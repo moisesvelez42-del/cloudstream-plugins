@@ -159,91 +159,77 @@ class TioDonghuaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val doc = app.get(data, referer = mainUrl).document
+        val doc = app.get(
+            data,
+            referer = mainUrl,
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        ).document
 
         var found = false
 
-        // ── Strategy 1: AJAX sources via DooPlay .dooplay_player_option ──────────
-        // Each option element looks like:
-        //  <li id='player-option-X' class='dooplay_player_option' data-type='tv' data-post='12345' data-nume='1'>
-        val playerOptions = doc.select(".dooplay_player_option[data-post]")
-        
-        if (playerOptions.isNotEmpty()) {
-            // Extract nonce from dtGonza script: var dtGonza = {"nonce":"...",...}
-            val dtGonzaScript = doc.select("script").find { 
-                it.data().contains("dtGonza") && it.data().contains("nonce") 
-            }?.data()
-            
-            val nonce = dtGonzaScript?.let { script ->
-                Regex("""\"nonce\"\s*:\s*\"([^\"]+)\"""").find(script)?.groupValues?.getOrNull(1)
-            } ?: doc.selectFirst("#nonce")?.attr("value")
-                ?: doc.selectFirst("input[name=_wpnonce]")?.attr("value")
-                ?: ""
+        // ── Strategy 1: DooPlay REST API (v2) ─────────────────────────────────
+        //
+        // tiodonghua.com uses the newer DooPlay REST endpoint — NOT admin-ajax.php.
+        //
+        //   Request:  GET /wp-json/dooplayer/v2/{post_id}/{type}/{nume}
+        //   Response: {"embed_url":"https:\/\/www.dailymotion.com\/embed\/video\/xxx","type":"iframe"}
+        //
+        // Player option HTML:
+        //   <li class="dooplay_player_option"
+        //       data-post="17993" data-type="tv" data-nume="1">Español 1</li>
+        //
+        // The site supports up to 12 servers per episode (Español 1-4, English 1-4,
+        // Portugues 1-4). No nonce is required for the REST endpoint.
+        val playerOptions = doc.select("li.dooplay_player_option[data-post][data-type][data-nume]")
 
-            for (option in playerOptions) {
-                val type = option.attr("data-type").trim().ifBlank { "tv" }
-                val postId = option.attr("data-post").trim()
-                val nume = option.attr("data-nume").trim()
-                
-                if (postId.isBlank() || nume.isBlank()) continue
+        for (option in playerOptions) {
+            val postId = option.attr("data-post").trim()
+            val type   = option.attr("data-type").trim().ifBlank { "tv" }
+            val nume   = option.attr("data-nume").trim()
 
-                // POST to the standard DooPlay AJAX endpoint
-                val ajaxResponse = app.post(
-                    "$mainUrl/wp-admin/admin-ajax.php",
-                    data = mapOf(
-                        "action" to "doo_player_ajax",
-                        "post" to postId,
-                        "nume" to nume,
-                        "type" to type,
-                        "nonce" to nonce,
-                    ),
+            if (postId.isBlank() || nume.isBlank()) continue
+
+            val apiUrl = "$mainUrl/wp-json/dooplayer/v2/$postId/$type/$nume"
+
+            val jsonText = try {
+                app.get(
+                    apiUrl,
                     referer = data,
                     headers = mapOf(
+                        "User-Agent"       to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "X-Requested-With" to "XMLHttpRequest",
-                        "Accept" to "application/json, text/javascript, */*; q=0.01"
+                        "Accept"           to "application/json, */*"
                     )
                 ).text
+            } catch (e: Exception) {
+                continue
+            }
 
-                // Parse embed_url from JSON response: {"embed_url":"...","type":"iframe"}
-                val embedUrl = Regex(""""embed_url"\s*:\s*"([^"]+)"""""")
-                    .find(ajaxResponse)?.groupValues?.getOrNull(1)?.let {
-                        it.replace("\\u0026", "&")
-                            .replace("\\/", "/")
-                            .replace("\\\"", "\"")
-                    }
+            // The API escapes forward slashes as \/ — unescape before use.
+            val embedUrl = Regex(""""embed_url"\s*:\s*"([^"]+)"""")
+                .find(jsonText)?.groupValues?.getOrNull(1)
+                ?.replace("\\/", "/")
+                ?.replace("\\u0026", "&")
+                ?.trim()
 
-                if (!embedUrl.isNullOrBlank()) {
-                    loadExtractor(embedUrl, data, subtitleCallback, callback)
-                    found = true
-                }
+            if (!embedUrl.isNullOrBlank() && embedUrl.startsWith("http")) {
+                loadExtractor(embedUrl, data, subtitleCallback, callback)
+                found = true
             }
         }
 
-        // ── Strategy 2: Direct iframes already present in the DOM ──────────────
+        // ── Strategy 2: Direct iframes already present in the DOM ─────────────
+        // Fallback for pages that inline the embed without player options.
         if (!found) {
             doc.select("iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").trim()
                 if (src.isNotBlank() && src.startsWith("http")) {
                     loadExtractor(src, data, subtitleCallback, callback)
                     found = true
-                }
-            }
-        }
-
-        // ── Strategy 3: /enlaces/ redirect links ───────────────────────────────
-        if (!found) {
-            doc.select("a[href*='/enlaces/']").forEach { a ->
-                val redirectUrl = a.attr("href").trim()
-                if (redirectUrl.isNotBlank()) {
-                    // Follow the redirect to get the real embed URL
-                    val response = app.get(redirectUrl, referer = data)
-                    val finalUrl = response.headers["location"] 
-                        ?: response.document.selectFirst("iframe[src]")?.attr("src")
-                        ?: redirectUrl
-                    if (finalUrl != redirectUrl) {
-                        loadExtractor(finalUrl, data, subtitleCallback, callback)
-                        found = true
-                    }
                 }
             }
         }
