@@ -1,0 +1,20 @@
+[
+    {
+        "iconUrl": "https://seriesdonghua.com/favicon.ico",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 21631,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 3,
+        "internalName": "SeriesDonghuaProvider",
+        "description": "Donghuas subtitulados en espa\u00f1ol en SeriesDonghua",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/SeriesDonghuaProvider.cs3",
+        "name": "SeriesDonghuaProvider"
+    }
+]
