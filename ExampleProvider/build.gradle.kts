@@ -22,3 +22,7 @@ cloudstream {
     // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
     tvTypes = listOf("Others")
 }
+
+android {
+    namespace = "com.example.exampleprovider"
+}
