@@ -1,0 +1,77 @@
+[
+    {
+        "iconUrl": "https://donghualife.com/sites/default/files/cropped-Publicacion-grafica-cuadrada-800x800-px-2-modified-1.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 14966,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "DonghuaLifeProvider",
+        "description": "DonghuaLife Extension",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/DonghuaLifeProvider.cs3",
+        "name": "DonghuaLifeProvider"
+    },
+    {
+        "iconUrl": "https://i2.wp.com/donghuastream.org/wp-content/uploads/2023/05/Donghua-Stream--scaled.jpeg",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 18203,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie"
+        ],
+        "version": 2,
+        "internalName": "DonghuaStreamProvider",
+        "description": "Watch donghua with English, Spanish & Chinese subtitles",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/DonghuaStreamProvider.cs3",
+        "name": "DonghuaStreamProvider"
+    },
+    {
+        "iconUrl": "https://seriesdonghua.com/favicon.ico",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 20894,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 7,
+        "internalName": "SeriesDonghuaProvider",
+        "description": "Donghuas subtitulados en espa\u00f1ol en SeriesDonghua",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/SeriesDonghuaProvider.cs3",
+        "name": "SeriesDonghuaProvider"
+    },
+    {
+        "iconUrl": "https://tiodonghua.com/wp-content/uploads/2021/07/cropped-TICO2-192x192.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 19057,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 4,
+        "internalName": "TioDonghuaProvider",
+        "description": "Donghua sub espa\u00f1ol gratis en HD",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/TioDonghuaProvider.cs3",
+        "name": "TioDonghuaProvider"
+    }
+]
