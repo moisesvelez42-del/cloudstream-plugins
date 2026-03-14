@@ -1,0 +1,144 @@
+[
+    {
+        "iconUrl": "https://donghualife.com/sites/default/files/cropped-Publicacion-grafica-cuadrada-800x800-px-2-modified-1.png",
+        "fileHash": "sha256-48bfc3f65735cee1d590af49037c8310c161c04ee297b59fcda1a157e8f2f3c3",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 14967,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "DonghuaLifeProvider",
+        "description": "DonghuaLife Extension",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/DonghuaLifeProvider.cs3",
+        "name": "DonghuaLifeProvider"
+    },
+    {
+        "iconUrl": "https://i2.wp.com/donghuastream.org/wp-content/uploads/2023/05/Donghua-Stream--scaled.jpeg",
+        "fileHash": "sha256-f5b377b83ea6d72ffe5127d015e7ecf5a11dfaee62f2e8b3a2a821b9b4bd6f88",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 18206,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie"
+        ],
+        "version": 2,
+        "internalName": "DonghuaStreamProvider",
+        "description": "Watch donghua with English, Spanish & Chinese subtitles",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/DonghuaStreamProvider.cs3",
+        "name": "DonghuaStreamProvider"
+    },
+    {
+        "iconUrl": "https://www.donghuazone.com/favicon.ico",
+        "fileHash": "sha256-b4fc96a4418fc2454ad0fd17b231d8778680d6a06ee75b904ee9c7a7c41b78ab",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 30059,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "DonghuaZoneProvider",
+        "description": "Extensi\u00f3n para DonghuaZone - Donghuas en 4K",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/DonghuaZoneProvider.cs3",
+        "name": "DonghuaZoneProvider"
+    },
+    {
+        "iconUrl": "https://lmanime.com/wp-content/uploads/2021/04/cropped-LMANIME-icono-2-192x192.png",
+        "fileHash": "sha256-a12143538d5a01c96bfba441cb5eb18df1945feab2abb6ff8d220492dad18d74",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 20717,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "LmanimeProvider",
+        "description": "Extensi\u00f3n para Lmanime - Anime",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/LmanimeProvider.cs3",
+        "name": "LmanimeProvider"
+    },
+    {
+        "iconUrl": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/MundoDonghuaProvider.png",
+        "fileHash": "sha256-8af1466ec2cac8fdbdcb1e98c02fb13e43207d51d4d851535735ed83d4d9f3aa",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 19089,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 7,
+        "internalName": "MundoDonghuaProvider",
+        "description": "Extensi\u00f3n para MundoDonghua - Donghuas en espa\u00f1ol",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/MundoDonghuaProvider.cs3",
+        "name": "MundoDonghuaProvider"
+    },
+    {
+        "iconUrl": "https://seriesdonghua.com/favicon.ico",
+        "fileHash": "sha256-c356663c50c4bafe8204895ba78dad50d7102ad6c43e49f1649fe9706c608e03",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 20899,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 7,
+        "internalName": "SeriesDonghuaProvider",
+        "description": "Donghuas subtitulados en espa\u00f1ol en SeriesDonghua",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/SeriesDonghuaProvider.cs3",
+        "name": "SeriesDonghuaProvider"
+    },
+    {
+        "iconUrl": "https://tiodonghua.com/wp-content/uploads/2021/07/cropped-TICO2-192x192.png",
+        "fileHash": "sha256-3fffbc1aacbd44b6efe6b518d3b7febb2fa0c5bef225870ba175f2791d0219ac",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/moisesvelez42-del/cloudstream-plugins",
+        "fileSize": 19056,
+        "status": 1,
+        "authors": [
+            "community"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 4,
+        "internalName": "TioDonghuaProvider",
+        "description": "Donghua sub espa\u00f1ol gratis en HD",
+        "url": "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/TioDonghuaProvider.cs3",
+        "name": "TioDonghuaProvider"
+    }
+]
