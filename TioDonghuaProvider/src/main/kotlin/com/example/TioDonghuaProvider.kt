@@ -159,63 +159,58 @@ class TioDonghuaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val doc = app.get(data).document
-
-        // The site wraps each video source option inside a <li> element with
-        // data-type and data-post / data-nume attributes used by an AJAX endpoint.
-        // We try two strategies:
-        //
-        // 1. Direct iframes already present in the DOM
-        // 2. AJAX request to the server endpoint to get the embed URL
+        val doc = app.get(data, referer = mainUrl).document
 
         var found = false
 
-        // ── Strategy 1: iframe already in DOM ─────────────────────────────────
-        doc.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src").trim()
-            if (src.isNotBlank() && src.startsWith("http")) {
-                loadExtractor(src, data, subtitleCallback, callback)
-                found = true
-            }
-        }
-
-        // ── Strategy 2: AJAX sources via DooPlay /wp-admin/admin-ajax.php ─────
+        // ── Strategy 1: AJAX sources via DooPlay .dooplay_player_option ──────────
         // Each option element looks like:
-        //  <li data-type="… " data-post="12345" data-nume="1" data-server="…">
-        val postId = doc.selectFirst("#playeroptionscms li[data-post]")
-            ?.attr("data-post")
+        //  <li id='player-option-X' class='dooplay_player_option' data-type='tv' data-post='12345' data-nume='1'>
+        val playerOptions = doc.select(".dooplay_player_option[data-post]")
+        
+        if (playerOptions.isNotEmpty()) {
+            // Extract nonce from dtGonza script: var dtGonza = {"nonce":"...",...}
+            val dtGonzaScript = doc.select("script").find { 
+                it.data().contains("dtGonza") && it.data().contains("nonce") 
+            }?.data()
+            
+            val nonce = dtGonzaScript?.let { script ->
+                Regex("""\"nonce\"\s*:\s*\"([^\"]+)\"""").find(script)?.groupValues?.getOrNull(1)
+            } ?: doc.selectFirst("#nonce")?.attr("value")
+                ?: doc.selectFirst("input[name=_wpnonce]")?.attr("value")
+                ?: ""
 
-        if (postId != null) {
-            val options = doc.select("#playeroptionscms li[data-post]")
-            for (option in options) {
-                val type  = option.attr("data-type").trim()
-                val nume  = option.attr("data-nume").trim()
-                val nonce = doc.selectFirst("#nonce")?.attr("value")
-                    ?: doc.selectFirst("input[name=_wpnonce]")?.attr("value")
-                    ?: ""
+            for (option in playerOptions) {
+                val type = option.attr("data-type").trim().ifBlank { "tv" }
+                val postId = option.attr("data-post").trim()
+                val nume = option.attr("data-nume").trim()
+                
+                if (postId.isBlank() || nume.isBlank()) continue
 
                 // POST to the standard DooPlay AJAX endpoint
                 val ajaxResponse = app.post(
                     "$mainUrl/wp-admin/admin-ajax.php",
                     data = mapOf(
-                        "action"   to "doo_player_ajax",
-                        "post"     to postId,
-                        "nume"     to nume,
-                        "type"     to type,
-                        "nonce"    to nonce,
+                        "action" to "doo_player_ajax",
+                        "post" to postId,
+                        "nume" to nume,
+                        "type" to type,
+                        "nonce" to nonce,
                     ),
                     referer = data,
+                    headers = mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Accept" to "application/json, text/javascript, */*; q=0.01"
+                    )
                 ).text
 
-                // The response is a JSON blob: {"embed_url":"…", …} or raw HTML
-                val embedUrl = Regex(""""embed_url"\s*:\s*"([^"]+)"""")
+                // Parse embed_url from JSON response: {"embed_url":"...","type":"iframe"}
+                val embedUrl = Regex(""""embed_url"\s*:\s*"([^"]+)"""""")
                     .find(ajaxResponse)?.groupValues?.getOrNull(1)?.let {
-                        // Unescape JSON unicode escapes
                         it.replace("\\u0026", "&")
                             .replace("\\/", "/")
+                            .replace("\\\"", "\"")
                     }
-                    ?: Regex("""src=['"](https?://[^'"]+)['"]""")
-                        .find(ajaxResponse)?.groupValues?.getOrNull(1)
 
                 if (!embedUrl.isNullOrBlank()) {
                     loadExtractor(embedUrl, data, subtitleCallback, callback)
@@ -224,16 +219,32 @@ class TioDonghuaProvider : MainAPI() {
             }
         }
 
-        // ── Strategy 3: /enlaces/ redirect links already listed in DOM ────────
-        // Some episodes expose direct redirect links in the "Enlaces" block
-        doc.select("a[href*='/enlaces/']").forEach { a ->
-            val redirectUrl = a.attr("href").trim()
-            if (redirectUrl.isNotBlank()) {
-                // Follow the redirect to get the real embed URL
-                val finalUrl = app.get(redirectUrl, allowRedirects = false)
-                    .headers["location"] ?: redirectUrl
-                loadExtractor(finalUrl, data, subtitleCallback, callback)
-                found = true
+        // ── Strategy 2: Direct iframes already present in the DOM ──────────────
+        if (!found) {
+            doc.select("iframe[src]").forEach { iframe ->
+                val src = iframe.attr("src").trim()
+                if (src.isNotBlank() && src.startsWith("http")) {
+                    loadExtractor(src, data, subtitleCallback, callback)
+                    found = true
+                }
+            }
+        }
+
+        // ── Strategy 3: /enlaces/ redirect links ───────────────────────────────
+        if (!found) {
+            doc.select("a[href*='/enlaces/']").forEach { a ->
+                val redirectUrl = a.attr("href").trim()
+                if (redirectUrl.isNotBlank()) {
+                    // Follow the redirect to get the real embed URL
+                    val response = app.get(redirectUrl, referer = data)
+                    val finalUrl = response.headers["location"] 
+                        ?: response.document.selectFirst("iframe[src]")?.attr("src")
+                        ?: redirectUrl
+                    if (finalUrl != redirectUrl) {
+                        loadExtractor(finalUrl, data, subtitleCallback, callback)
+                        found = true
+                    }
+                }
             }
         }
 
