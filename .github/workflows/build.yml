@@ -13,6 +13,9 @@ on:
       - main
     paths-ignore:
       - '*.md'
+      
+permissions:
+  contents: write
 
 jobs:
   build:
