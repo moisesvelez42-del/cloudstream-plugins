@@ -164,27 +164,33 @@ class SeriesDonghuaProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val baseUrl = request.data
-        val url = when {
-            // Paginate the main page listing
-            page > 1 && baseUrl == "$mainUrl/" -> "$mainUrl/episodios/page/$page/"
-            page > 1                            -> "$baseUrl/page/$page/"
-            else                                -> baseUrl
-        }
+        // Only the main page "/episodios/page/X/" has pagination that works. The category pages return 404.
+        val url = if (page > 1 && baseUrl == "$mainUrl/") "$mainUrl/episodios/page/$page/" else baseUrl
+        
+        if (page > 1 && baseUrl != "$mainUrl/") return newHomePageResponse(request.name, emptyList())
+
         val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
         val items = doc.select("div.item").mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        
+        // Only the main "Nuevos Episodios" list has a next page we know about
+        val hasNextPage = items.isNotEmpty() && baseUrl == "$mainUrl/"
+        return newHomePageResponse(request.name, items, hasNext = hasNextPage)
     }
 
     // ── Helper: parse a card element into SearchResponse ─────────────────────
 
     private fun Element.toSearchResult(): SearchResponse? {
         val anchor = selectFirst("a.angled-img") ?: selectFirst("a") ?: return null
-        val url    = anchor.absUrl("href").ifBlank { return null }
-        val title  = selectFirst("h5.sf, h5, .bg-titulo, .bottom-info h5")
-            ?.text()?.trim() ?: return null
-        val poster = selectFirst("img")?.let {
-            it.absUrl("src").ifBlank { it.absUrl("data-src") }
-        }?.trim()
+        val urlAttr = anchor.attr("href")
+        if (urlAttr.isBlank()) return null
+        val url = if (urlAttr.startsWith("http")) urlAttr else "$mainUrl/${urlAttr.trimStart('/')}"
+
+        val title = selectFirst("h5.sf, h5, .bg-titulo, .bottom-info h5")?.text()?.trim() ?: return null
+        
+        val imgEl = selectFirst("img")
+        val posterAttr = imgEl?.attr("src")?.ifBlank { imgEl.attr("data-src") }
+        val poster = posterAttr?.let { if (it.startsWith("http")) it else "$mainUrl/${it.trimStart('/')}" }
+
         return newAnimeSearchResponse(title, url, TvType.Anime) { this.posterUrl = poster }
     }
 
