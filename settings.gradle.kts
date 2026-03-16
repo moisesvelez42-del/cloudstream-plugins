@@ -3,7 +3,8 @@ rootProject.name = "CloudstreamPlugins"
 // This file sets what projects are included. All new projects should get automatically included unless specified in "disabled" variable.
 
 val disabled = listOf(
-    "ExampleProvider"
+    "ExampleProvider",
+    "TioDonghuaProvider"
 )
 
 File(rootDir, ".").eachDir { dir ->
