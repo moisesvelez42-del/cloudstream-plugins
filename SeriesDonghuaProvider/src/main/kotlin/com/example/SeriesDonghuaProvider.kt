@@ -24,7 +24,6 @@ class SeriesDonghuaProvider : MainAPI() {
     override var mainUrl  = "https://seriesdonghua.com"
     override var name     = "SeriesDonghua"
     override var lang     = "es"
-    override var lang     = 1
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
