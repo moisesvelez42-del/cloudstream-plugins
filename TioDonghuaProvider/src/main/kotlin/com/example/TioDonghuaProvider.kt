@@ -15,10 +15,12 @@ class TioDonghuaProvider : MainAPI() {
     // ─── Main page sections ───────────────────────────────────────────────────
 
     override val mainPage = mainPageOf(
-        "$mainUrl/"                                           to "Inicio",
-        "$mainUrl/genero/donghua/page/"                      to "Donghua",
-        "$mainUrl/genero/mundo-donghua/page/"                to "En emisión",
-        "$mainUrl/peliculas/page/"                           to "Películas",
+        "$mainUrl/"                                           to "Latest",
+        "$mainUrl/tendencias/page/"                           to "Popular",
+        "$mainUrl/genero/anime/page/"                         to "Anime",
+        "$mainUrl/genero/donghua/page/"                       to "Donghua",
+        "$mainUrl/genero/mundo-donghua/page/"                 to "En Emisión",
+        "$mainUrl/peliculas/page/"                            to "Movies",
     )
 
     /**
@@ -30,6 +32,7 @@ class TioDonghuaProvider : MainAPI() {
         val url     = anchor.attr("href").trim()
         val title   = selectFirst(".data h3")?.text()?.trim()
             ?: selectFirst("h3")?.text()?.trim()
+            ?: selectFirst("img")?.attr("alt")?.trim()
             ?: return null
         val poster  = selectFirst("img")?.let {
             it.attr("data-src").ifBlank { it.attr("src") }
@@ -217,6 +220,19 @@ class TioDonghuaProvider : MainAPI() {
                 ?.trim()
 
             if (!embedUrl.isNullOrBlank() && embedUrl.startsWith("http")) {
+                if (embedUrl.contains("minochinos.com") || embedUrl.contains("tiodonghua.com")) {
+                    try {
+                        val docWrapper = app.get(embedUrl, referer = mainUrl).document
+                        docWrapper.select("iframe[src]").forEach { iframe ->
+                            val iframeSrc = iframe.attr("src")
+                            if (iframeSrc.startsWith("http")) {
+                                loadExtractor(iframeSrc, data, subtitleCallback, callback)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Ignore wrapper timeout/errors
+                    }
+                }
                 loadExtractor(embedUrl, data, subtitleCallback, callback)
                 found = true
             }
