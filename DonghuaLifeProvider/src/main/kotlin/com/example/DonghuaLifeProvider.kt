@@ -155,9 +155,17 @@ class DonghuaLifeProvider : MainAPI() {
     }
 
     // ─── Video links ──────────────────────────────────────────────────────────
-    // Episode pages embed the player in a standard <iframe src="…"> tag.
-    // Supported via Cloudstream's built-in loadExtractor:
-    //   Rumble, Dailymotion, Ok.ru, Streamtape, Filemoon, Doodstream, etc.
+    // The episode page lists ALL servers as anchor tags:
+    //
+    //   <a class="toggle-enlace"
+    //      data-video="https://rumble.com/embed/…"
+    //      title="rumble">rumble</a>
+    //   <a class="toggle-enlace"
+    //      data-video="https://geo.dailymotion.com/player.html?video=…"
+    //      title="Dailymotion">Dailymotion</a>
+    //
+    // The visible <iframe id="iframe-episode"> only reflects the active server.
+    // We read every anchor's data-video to surface ALL available servers.
 
     override suspend fun loadLinks(
         data: String,
@@ -168,11 +176,23 @@ class DonghuaLifeProvider : MainAPI() {
         val doc = app.get(data, referer = mainUrl).document
         var found = false
 
-        doc.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
-            if (src.startsWith("http")) {
-                loadExtractor(src, data, subtitleCallback, callback)
+        // Strategy 1: server-selector anchors (covers ALL available servers)
+        doc.select("a.toggle-enlace[data-video]").forEach { anchor ->
+            val videoUrl = anchor.attr("data-video").trim()
+            if (videoUrl.startsWith("http")) {
+                loadExtractor(videoUrl, data, subtitleCallback, callback)
                 found = true
+            }
+        }
+
+        // Strategy 2: fallback – read the currently-active iframe
+        if (!found) {
+            doc.select("#video-container iframe, iframe[id=iframe-episode], iframe").forEach { iframe ->
+                val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
+                if (src.startsWith("http")) {
+                    loadExtractor(src, data, subtitleCallback, callback)
+                    found = true
+                }
             }
         }
 
