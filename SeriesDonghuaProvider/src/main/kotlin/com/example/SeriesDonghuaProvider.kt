@@ -90,56 +90,40 @@ class SeriesDonghuaProvider : MainAPI() {
 
         /**
          * Extract all embed/video URLs from the decoded JS.
-         * Primary: parse VIDEO_MAP_JSON values (handles escaped slashes and JSON-encoded strings).
-         * Fallback: generic regex scan for known video-hosting domains.
+         * The decoded JS contains: document.write('<script>const VIDEO_MAP_JSON={...}')
+         * Due to JS escaping inside strings, the URLs have many levels of backslashes.
          */
         fun extractEmbedsFromJs(js: String): List<String> {
             val results = mutableListOf<String>()
             val seen    = mutableSetOf<String>()
 
             fun add(url: String) {
-                val clean = url.replace("\\/", "/").trim('"', '\'', ' ')
+                val clean = url.trim('"', '\'', ' ')
                 if (clean.startsWith("http") && seen.add(clean)) results.add(clean)
             }
 
-            // ── VIDEO_MAP_JSON entries ─────────────────────────────────────────
-            // Typical entry: "skadi":"\"https:\\/\\/ok.ru\\/videoembed\\/123456\""
-            // After JSON-parsing the outer string the value is: "https://ok.ru/videoembed/123456"
-            //   → we want: https://ok.ru/videoembed/123456
-            val mapValueRegex = Regex(""""[^"]+"\s*:\s*"((?:\\.|[^"])*?)"""")
-            mapValueRegex.findAll(js).forEach { m ->
-                val raw = m.groupValues[1]
-                    .replace("\\\"", "\"")  // un-escape outer quotes
-                    .replace("\\/", "/")    // un-escape slashes
-                    .trim('"')
-                // Dailymotion special case: entry contains just a video ID (no http)
-                if (raw.matches(Regex("[a-zA-Z0-9_-]{5,20}")) && !raw.startsWith("http")) {
-                    add("https://www.dailymotion.com/embed/video/$raw")
-                } else {
-                    add(raw)
+            // Unescape the string progressively to remove all backslash escaping
+            var unescaped = js
+            for (i in 0..5) {
+                unescaped = unescaped.replace(Regex("""\\(.)"""), "$1")
+            }
+
+            // Now the string contains clean URLs like: "https://ok.ru/videoembed/..."
+            val urlRegex = Regex("""https?://[^\s"'<>&`]+""")
+            urlRegex.findAll(unescaped).forEach { m ->
+                // Skip the site's own wrapper player.php?url=...
+                if (!m.value.contains("player.php")) {
+                    add(m.value)
                 }
             }
 
-            // ── Generic URL fallback ────────────────────────────────────────────
-            Regex("""https?://[^\s"'<>&\\]+""").findAll(js).forEach { add(it.value) }
-            Regex("""https?:\\/\\/[^\s"'<>&]+""").findAll(js).forEach { add(it.value) }
+            // Extract the Dailymotion ID. In the unescaped string it looks like: "asura":""VIDEO_ID""
+            val dmRegex = Regex(""""asura"\s*:\s*""?([a-zA-Z0-9_-]{5,25})""?""")
+            dmRegex.find(unescaped)?.groupValues?.getOrNull(1)?.let { dmId ->
+                if (!dmId.startsWith("http")) add("https://www.dailymotion.com/embed/video/$dmId")
+            }
 
-            return results.filter { url ->
-                listOf(
-                    "dailymotion.com",
-                    "ok.ru",
-                    "rumble.com",
-                    "voe.sx",
-                    "odysee.com",
-                    "streamsb", "strsb", "sbplay",
-                    "filemoon", "moon",
-                    "streamwish", "wishembed",
-                    "doodstream", "dood.",
-                    "upstream",
-                    "streamlare",
-                    "mixdrop",
-                ).any { domain -> url.contains(domain, ignoreCase = true) }
-            }.distinct()
+            return results
         }
     }
 
