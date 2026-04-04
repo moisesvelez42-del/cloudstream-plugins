@@ -175,8 +175,8 @@ class SeriesDonghuaProvider : MainAPI() {
     // NOTE: Previously the code was filtering OUT series URLs by mistake.
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // URL-encode the query for safety
-        val encoded = query.trim().replace(" ", "+")
+        // URL-encode the query for safety, converting spaces to %20
+        val encoded = java.net.URLEncoder.encode(query.trim(), "utf-8").replace("+", "%20")
         val doc = app.get(
             "$mainUrl/busquedas/$encoded",
             headers = mapOf("User-Agent" to USER_AGENT)
