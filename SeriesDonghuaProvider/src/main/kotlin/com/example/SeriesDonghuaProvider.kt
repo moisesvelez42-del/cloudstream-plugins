@@ -5,26 +5,33 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 /**
- * CloudStream3 extension for https://seriesdonghua.com
+ * CloudStream3 extension for https://seriesdonghua.com  (v4)
  *
- * --- Video loading strategy ---
- * Episode pages embed ALL video-server URLs inside an obfuscated eval() block.
- * The block uses the site's own base-N decoder (_0xe37c) with:
- *   h = encoded string
- *   u = base (26)
- *   n = charset "ZnqBsSzeV"
- *   t = offset (11)
- *   e = separator index (2 → 'n')
- *   r = max (36, unused)
+ * ── Video loading strategy ───────────────────────────────────────────────────
+ * Episode pages embed ALL video-server URLs inside an obfuscated eval() block:
  *
- * We re-implement that decoder in Kotlin to extract all embed URLs.
+ *   eval(function(h,u,n,t,e,r){ … }("ENCODED_STR", BASE, "CHARSET", OFFSET, SEP_IDX, r))
+ *
+ * The parameters change with each deployment, so we extract them dynamically.
+ *
+ * The decoded output is a <script> block containing:
+ *   const VIDEO_MAP_JSON={
+ *     "skadi":"\"https:\\/\\/ok.ru\\/videoembed\\/...\""
+ *     "fembed":"\"https:\\/\\/rumble.com\\/embed\\/...\""
+ *     "tape":"\"https:\\/\\/odysee.com\\/$\\/embed\\/...\""
+ *     "amagi":"\"https:\\/\\/voe.sx\\/e\\/...\""
+ *     "asura":"\"DAILYMOTION_VIDEO_ID\""   ← ID only, needs prefix
+ *   }
+ *
+ * Dailymotion is embedded as:
+ *   https://www.dailymotion.com/embed/video/<id>
  */
 class SeriesDonghuaProvider : MainAPI() {
 
     override var mainUrl  = "https://seriesdonghua.com"
     override var name     = "SeriesDonghua"
     override var lang     = "es"
-    override val hasMainPage = true
+    override val hasMainPage   = true
     override val supportedTypes = setOf(TvType.Anime)
 
     companion object {
@@ -32,14 +39,9 @@ class SeriesDonghuaProvider : MainAPI() {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-        // Charset used by the site's base-64 encoder (_0xe37c uses the full charset for lookup)
         private const val BASE64_CHARSET =
             "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/"
 
-        /**
-         * Converts a number encoded in [fromBase] to a decimal Long.
-         * Python equivalent: int(token, fromBase) but using BASE64_CHARSET alphabet.
-         */
         private fun fromCustomBase(token: String, fromBase: Int): Long {
             val alphabet = BASE64_CHARSET.take(fromBase)
             var value = 0L
@@ -53,55 +55,29 @@ class SeriesDonghuaProvider : MainAPI() {
 
         /**
          * Decode the site's eval() block.
-         *
-         * The JS call looks like:
-         *   eval(function(h,u,n,t,e,r){ ... }("ENCODED",26,"ZnqBsSzeV",11,2,36))
-         *
-         * Algorithm (from the inline JS decompiler):
-         *   For each token (split on n[e] = charset[sep]):
-         *     Replace each char in n with its index digit(s)
-         *     Convert the resulting number from base-e to base-10
-         *     Subtract t → char code
-         *     Append the character
-         *   Return decodeURIComponent(escape(result))
+         * Params are extracted dynamically from the page (they are NOT hardcoded).
          *
          * @param encoded  The obfuscated string (h)
-         * @param base     The numeric base used for lookups in BASE64_CHARSET (u) – 26
-         * @param charset  The n-parameter charset string – "ZnqBsSzeV"
-         * @param offset   t parameter – 11
-         * @param sepIndex e parameter (index into charset for separator) – 2
+         * @param base     Lookup base used inside `fromCustomBase` – unused for char-replacement step
+         * @param charset  The n-parameter charset used to replace chars → digit indexes
+         * @param offset   t – subtracted from the numeric value to get the char code
+         * @param sepIndex e – index into charset giving the separator character
          */
         fun decodeEvalBlock(
             encoded: String,
-            base: Int     = 26,
-            charset: String = "ZnqBsSzeV",
-            offset: Int   = 11,
-            sepIndex: Int = 2,
+            charset: String,
+            offset: Int,
+            sepIndex: Int,
         ): String {
             val sepChar = charset[sepIndex]
             val sb = StringBuilder()
-            var i = 0
-            while (i < encoded.length) {
-                val tokenSb = StringBuilder()
-                while (i < encoded.length && encoded[i] != sepChar) {
-                    tokenSb.append(encoded[i])
-                    i++
-                }
-                i++ // skip separator
-
-                // Replace each charset char with its index
-                var s = tokenSb.toString()
+            for (token in encoded.split(sepChar)) {
+                if (token.isEmpty()) continue
+                var s = token
                 for (j in charset.indices) {
                     s = s.replace(charset[j].toString(), j.toString())
                 }
-
-                // s is now a string of digits in base-`sepIndex`
-                // (e.g. binary "10110" when sepIndex=2, octal when sepIndex=8, etc.)
-                // _0xe37c(s, e, 10) converts from base-e to base-10 using BASE64_CHARSET.
-                // Since after substitution the digits are 0...(charset.size-1) and
-                // BASE64_CHARSET starts with "0123456789..." this is just a standard
-                // base conversion with `s` interpreted as a base-`sepIndex` number.
-                val decimal = fromCustomBase(s, sepIndex)
+                val decimal  = fromCustomBase(s, sepIndex)
                 val charCode = decimal - offset
                 if (charCode > 0) sb.append(charCode.toInt().toChar())
             }
@@ -113,28 +89,42 @@ class SeriesDonghuaProvider : MainAPI() {
         }
 
         /**
-         * Parse the decoded JS to extract all embed/video URLs.
-         * Looks for all known video hosting domains.
+         * Extract all embed/video URLs from the decoded JS.
+         * Primary: parse VIDEO_MAP_JSON values (handles escaped slashes and JSON-encoded strings).
+         * Fallback: generic regex scan for known video-hosting domains.
          */
         fun extractEmbedsFromJs(js: String): List<String> {
             val results = mutableListOf<String>()
-            val seen = mutableSetOf<String>()
+            val seen    = mutableSetOf<String>()
 
             fun add(url: String) {
                 val clean = url.replace("\\/", "/").trim('"', '\'', ' ')
                 if (clean.startsWith("http") && seen.add(clean)) results.add(clean)
             }
 
-            // Generic URL extractor for https:// patterns inside strings
-            val urlRegex = Regex("""https?://[^\s"'<>&\\]+""")
-            urlRegex.findAll(js).forEach { add(it.value) }
+            // ── VIDEO_MAP_JSON entries ─────────────────────────────────────────
+            // Typical entry: "skadi":"\"https:\\/\\/ok.ru\\/videoembed\\/123456\""
+            // After JSON-parsing the outer string the value is: "https://ok.ru/videoembed/123456"
+            //   → we want: https://ok.ru/videoembed/123456
+            val mapValueRegex = Regex(""""[^"]+"\s*:\s*"((?:\\.|[^"])*?)"""")
+            mapValueRegex.findAll(js).forEach { m ->
+                val raw = m.groupValues[1]
+                    .replace("\\\"", "\"")  // un-escape outer quotes
+                    .replace("\\/", "/")    // un-escape slashes
+                    .trim('"')
+                // Dailymotion special case: entry contains just a video ID (no http)
+                if (raw.matches(Regex("[a-zA-Z0-9_-]{5,20}")) && !raw.startsWith("http")) {
+                    add("https://www.dailymotion.com/embed/video/$raw")
+                } else {
+                    add(raw)
+                }
+            }
 
-            // Also catch escaped https (https:\/\/)
-            val escapedUrlRegex = Regex("""https?:\\/\\/[^\s"'<>&]+""")
-            escapedUrlRegex.findAll(js).forEach { add(it.value) }
+            // ── Generic URL fallback ────────────────────────────────────────────
+            Regex("""https?://[^\s"'<>&\\]+""").findAll(js).forEach { add(it.value) }
+            Regex("""https?:\\/\\/[^\s"'<>&]+""").findAll(js).forEach { add(it.value) }
 
             return results.filter { url ->
-                // Only keep known embed domains
                 listOf(
                     "dailymotion.com",
                     "ok.ru",
@@ -156,124 +146,123 @@ class SeriesDonghuaProvider : MainAPI() {
     // ── Main page ─────────────────────────────────────────────────────────────
 
     override val mainPage = mainPageOf(
-        "$mainUrl/"                     to "Nuevos Episodios",
-        "$mainUrl/todos-los-donghuas"   to "Todos los Donghuas",
-        "$mainUrl/donghuas-en-emision"  to "En Emisión",
-        "$mainUrl/donghuas-finalizados" to "Finalizados",
+        "$mainUrl/"                      to "Nuevos Episodios",
+        "$mainUrl/todos-los-donghuas"    to "Todos los Donghuas",
+        "$mainUrl/donghuas-en-emision"   to "En Emisión",
+        "$mainUrl/donghuas-finalizados"  to "Finalizados",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val baseUrl = request.data
-        // Only the main page "/episodios/page/X/" has pagination that works. The category pages return 404.
-        val url = if (page > 1 && baseUrl == "$mainUrl/") "$mainUrl/episodios/page/$page/" else baseUrl
-        
-        if (page > 1 && baseUrl != "$mainUrl/") return newHomePageResponse(request.name, emptyList())
+        // Pagination only works reliably on the "new episodes" feed
+        val url = if (page > 1 && baseUrl == "$mainUrl/")
+            "$mainUrl/episodios/page/$page/"
+        else if (page > 1)
+            return newHomePageResponse(request.name, emptyList())
+        else
+            baseUrl
 
-        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
+        val doc   = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
         val items = doc.select("div.item").mapNotNull { it.toSearchResult() }
-        
-        // Only the main "Nuevos Episodios" list has a next page we know about
-        val hasNextPage = items.isNotEmpty() && baseUrl == "$mainUrl/"
-        return newHomePageResponse(request.name, items, hasNext = hasNextPage)
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty() && baseUrl == "$mainUrl/")
     }
 
-    // ── Helper: parse a card element into SearchResponse ─────────────────────
+    // ── Card parser ───────────────────────────────────────────────────────────
+    // div.item > a.angled-img[href] > div.img > img[src]
+    //                               > div.bottom-info > h5
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = selectFirst("a.angled-img") ?: selectFirst("a") ?: return null
-        val urlAttr = anchor.attr("href")
-        if (urlAttr.isBlank()) return null
-        val url = if (urlAttr.startsWith("http")) urlAttr else "$mainUrl/${urlAttr.trimStart('/')}"
+        val anchor  = selectFirst("a.angled-img, a") ?: return null
+        val urlAttr = anchor.attr("href").trim().ifBlank { return null }
+        val url     = fixUrl(urlAttr)
 
-        val title = selectFirst("h5.sf, h5, .bg-titulo, .bottom-info h5")?.text()?.trim() ?: return null
-        
-        val imgEl = selectFirst("img")
-        val posterAttr = imgEl?.attr("src")?.ifBlank { imgEl.attr("data-src") }
-        val poster = posterAttr?.let { if (it.startsWith("http")) it else "$mainUrl/${it.trimStart('/')}" }
+        val title = selectFirst("h5.sf, h5, .bg-titulo, .bottom-info h5")
+            ?.text()?.trim() ?: return null
 
-        return newAnimeSearchResponse(title, url, TvType.Anime) { this.posterUrl = poster }
+        val imgEl  = selectFirst("img")
+        val rawImg = imgEl?.attr("src")?.ifBlank { imgEl.attr("data-src") }
+        val poster = rawImg?.let { fixUrl(it) }
+
+        return newAnimeSearchResponse(title, url, TvType.Anime) { posterUrl = poster }
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
+    // Endpoint: /busquedas/<query> – returns series cards (div.item with series URLs)
+    // NOTE: Previously the code was filtering OUT series URLs by mistake.
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // The site's own JS uses: location.href = "/busquedas/" + name
+        // URL-encode the query for safety
+        val encoded = query.trim().replace(" ", "+")
         val doc = app.get(
-            "$mainUrl/busquedas/$query",
+            "$mainUrl/busquedas/$encoded",
             headers = mapOf("User-Agent" to USER_AGENT)
         ).document
 
         return doc.select("div.item").mapNotNull { el ->
-            val anchor = el.selectFirst("a.angled-img") ?: return@mapNotNull null
+            val anchor = el.selectFirst("a.angled-img, a") ?: return@mapNotNull null
             val href   = anchor.absUrl("href").ifBlank { return@mapNotNull null }
-            // Skip individual episode pages from search results
-            if (Regex("""-episodio-\d""").containsMatchIn(href)) return@mapNotNull null
+            // /busquedas/ returns series pages — keep all results
             el.toSearchResult()
         }
     }
 
-    // ── Load (Series / Episode detail page) ──────────────────────────────────
+    // ── Load ──────────────────────────────────────────────────────────────────
 
     override suspend fun load(url: String): LoadResponse? {
-        val res = app.get(url, headers = mapOf("User-Agent" to USER_AGENT))
+        val h   = mapOf("User-Agent" to USER_AGENT)
+        val res = app.get(url, headers = h)
         val doc = res.document
 
-        // Detect episode page by the hidden input
-        if (doc.selectFirst("input#donghua_key") != null) {
-            // For episode pages: try to navigate to the series page for full episode list
-            // The "List" button in the media-bar takes us there
-            val seriesUrl = doc.selectFirst("a[href*='/']:has(i.fa-list)")?.absUrl("href")
+        // ── Episode page detection ─────────────────────────────────────────────
+        if (doc.selectFirst("input#donghua_key") != null ||
+            doc.selectFirst("#tamamo_player, .player-container") != null) {
+
+            // Try to navigate to the parent series page via "list" link
+            val seriesUrl = doc.selectFirst("a:has(i.fa-list)")?.absUrl("href")
                 ?: doc.selectFirst(".media-bar-player a[href]:not([href*='episodio'])")?.absUrl("href")
 
             if (!seriesUrl.isNullOrBlank() && seriesUrl != url) {
-                // Recursively load the series page
                 return load(seriesUrl)
             }
 
-            // Fallback: return a movie-type response for standalone episode playback
-            val title  = doc.selectFirst("h3.sf, .title-serie, h3")?.text()?.trim() ?: "Episodio"
+            val title  = doc.selectFirst("h3.sf, .title-serie, h3, h1")?.text()?.trim() ?: "Episodio"
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            return newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-            }
+            return newMovieLoadResponse(title, url, TvType.Movie, url) { posterUrl = poster }
         }
 
-        // ── Series page ──────────────────────────────────────────────────────
+        // ── Series page ───────────────────────────────────────────────────────
 
         val title = doc.selectFirst(".ls-title-serie")?.text()?.trim()
             ?: doc.selectFirst("h1")?.text()?.trim()
             ?: return null
 
-        // Poster from background-image on .banner-side-serie
+        // Poster from CSS background or og:image
         val poster = doc.selectFirst(".banner-side-serie")?.attr("style")
-            ?.substringAfter("url(")?.substringBefore(")")
-            ?.trim()?.let { if (it.startsWith("http")) it else "$mainUrl/${it.trimStart('/')}" }
+            ?.substringAfter("url(", "")?.substringBefore(")", "")
+            ?.trim()?.let { fixUrl(it) }
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
 
         val synopsis = doc.select(".text-justify p")
-            .joinToString("\n") { it.text().trim() }
-            .ifBlank { null }
-
+            .joinToString("\n") { it.text().trim() }.ifBlank { null }
         val genres = doc.select("a.generos span, a.generos").map { it.text().trim() }
 
-        // Episodes inside <ul class="donghua-list"><a href="..."><li>...</li></a></ul>
         val episodes = doc.select("ul.donghua-list a").mapNotNull { anchor ->
             val epUrl  = anchor.absUrl("href").ifBlank { return@mapNotNull null }
             val epText = anchor.selectFirst("blockquote")?.text()?.trim()
                 ?: anchor.text().trim()
-            val epNum  = Regex("""-(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
+            val epNum  = Regex("""(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
                 ?: Regex("""-episodio-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
             newEpisode(epUrl) {
-                this.name    = epText
-                this.episode = epNum
-                this.season  = 1
+                name    = epText
+                episode = epNum
+                season  = 1
             }
         }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = poster
-            this.plot      = synopsis
-            this.tags      = genres
+            posterUrl = poster
+            plot      = synopsis
+            tags      = genres
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -289,67 +278,63 @@ class SeriesDonghuaProvider : MainAPI() {
         val headers = mapOf(
             "User-Agent"      to USER_AGENT,
             "Referer"         to mainUrl,
-            "Accept"          to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language" to "es-ES,es;q=0.9",
         )
         val response = app.get(data, headers = headers)
         val html     = response.text
         val doc      = response.document
+        var found    = false
 
-        var found = false
-
-        // ── Strategy 1: Decode the eval() block inside the page ──────────────
-        // Pattern: eval(function(h,u,n,t,e,r){...}("ENCODED",26,"ZnqBsSzeV",11,2,36))
+        // ── Strategy 1: Decode eval() block (dynamic params) ──────────────────
+        // Pattern: eval(function(h,u,n,t,e,r){r="";…}("ENCODED",BASE,"CHARSET",OFFSET,SEP,r))
         val evalRegex = Regex(
-            // Match the big encoded string followed by the known parameters
-            """eval\(function\(h,u,n,t,e,r\)\{[^}]+\}\("([^"]+)",(\d+),"([^"]+)",(\d+),(\d+),\d+\)\)"""
+            """eval\(function\(h,u,n,t,e,r\)\{r="".*?\}\("([^"]+)",(\d+),"([^"]+)",(\d+),(\d+),\d+\)\)""",
+            RegexOption.DOT_MATCHES_ALL
         )
         val evalMatch = evalRegex.find(html)
         if (evalMatch != null) {
-            val encoded   = evalMatch.groupValues[1]
-            val base      = evalMatch.groupValues[2].toIntOrNull() ?: 26
-            val charset   = evalMatch.groupValues[3]
-            val offsetVal = evalMatch.groupValues[4].toIntOrNull() ?: 11
-            val sepIdx    = evalMatch.groupValues[5].toIntOrNull() ?: 2
+            val encoded  = evalMatch.groupValues[1]
+            val charset  = evalMatch.groupValues[3]
+            val offset   = evalMatch.groupValues[4].toIntOrNull() ?: 11
+            val sepIndex = evalMatch.groupValues[5].toIntOrNull() ?: 2
 
-            val decoded = try {
-                decodeEvalBlock(encoded, base, charset, offsetVal, sepIdx)
-            } catch (_: Exception) { "" }
+            val decoded = try { decodeEvalBlock(encoded, charset, offset, sepIndex) }
+            catch (_: Exception) { "" }
 
             if (decoded.isNotBlank()) {
-                val embeds = extractEmbedsFromJs(decoded)
-                embeds.forEach { embedUrl ->
+                extractEmbedsFromJs(decoded).forEach { embedUrl ->
                     loadExtractor(embedUrl, data, subtitleCallback, callback)
                     found = true
                 }
             }
         }
 
-        // ── Strategy 2: Regex scan of raw HTML for known embed patterns ──────
-        // Even without decode success, try common URL patterns directly in HTML source
-        val rawEmbedPatterns = listOf(
-            Regex("""https?://geo\.dailymotion\.com/player\.html\?video=[A-Za-z0-9_-]+"""),
+        // ── Strategy 2: Raw URL patterns directly in the HTML source ──────────
+        val rawPatterns = listOf(
+            Regex("""https?://(?:geo\.)?dailymotion\.com/(?:player|embed)/[^\s"'<>&\\]+"""),
             Regex("""https?://www\.dailymotion\.com/embed/video/[A-Za-z0-9_-]+"""),
             Regex("""https?://ok\.ru/videoembed/\d+"""),
-            Regex("""https?://rumble\.com/embed/[A-Za-z0-9]+(?:/[^\s"'<>&]*)?"""),
+            Regex("""https?://rumble\.com/embed/[A-Za-z0-9]+(?:/[^\s"'<>&]*)?\??[^\s"'<>&]*"""),
             Regex("""https?://voe\.sx/e/[A-Za-z0-9]+"""),
             Regex("""https?://odysee\.com/\$/embed/[^\s"'<>&]+"""),
             Regex("""https?://[a-z0-9-]+\.filemoon\.[a-z]+/e/[A-Za-z0-9]+"""),
             Regex("""https?://[a-z0-9-]+\.streamwish\.[a-z]+/e/[A-Za-z0-9]+"""),
             Regex("""https?://dood\.[a-z]+/[de]/[A-Za-z0-9]+"""),
         )
-        for (pattern in rawEmbedPatterns) {
-            pattern.findAll(html).forEach { match ->
-                val rawUrl = match.value.replace("\\/", "/")
-                loadExtractor(rawUrl, data, subtitleCallback, callback)
-                found = true
+        for (pattern in rawPatterns) {
+            pattern.findAll(html).forEach { m ->
+                val rawUrl = m.value.replace("\\/", "/")
+                if (!rawUrl.contains("player.php")) {  // skip the wrapper
+                    loadExtractor(rawUrl, data, subtitleCallback, callback)
+                    found = true
+                }
             }
         }
 
-        // ── Strategy 3: Direct iframes already in DOM ────────────────────────
+        // ── Strategy 3: Direct iframes in DOM ─────────────────────────────────
         if (!found) {
-            doc.select("iframe[src]").forEach { iframe ->
-                val src = iframe.attr("src").trim()
+            doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
+                val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
                 if (src.startsWith("http") && !src.contains("cloudflare")) {
                     loadExtractor(src, data, subtitleCallback, callback)
                     found = true
@@ -357,17 +342,18 @@ class SeriesDonghuaProvider : MainAPI() {
             }
         }
 
-        // ── Strategy 4: data-* attributes on player container divs ───────────
+        // ── Strategy 4: data-* attributes on player containers ────────────────
         if (!found) {
-            doc.select("[data-video],[data-player],[data-src],[data-embed],[data-stream]").forEach { el ->
-                listOf("data-video", "data-player", "data-src", "data-embed", "data-stream").forEach { attr ->
-                    val src = el.attr(attr).trim()
-                    if (src.startsWith("http")) {
-                        loadExtractor(src, data, subtitleCallback, callback)
-                        found = true
+            doc.select("[data-video],[data-player],[data-src],[data-embed],[data-stream]")
+                .forEach { el ->
+                    for (attr in listOf("data-video", "data-player", "data-src", "data-embed", "data-stream")) {
+                        val src = el.attr(attr).trim()
+                        if (src.startsWith("http")) {
+                            loadExtractor(src, data, subtitleCallback, callback)
+                            found = true
+                        }
                     }
                 }
-            }
         }
 
         return found
