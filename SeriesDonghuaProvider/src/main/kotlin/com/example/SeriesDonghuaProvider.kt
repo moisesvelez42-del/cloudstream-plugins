@@ -175,19 +175,13 @@ class SeriesDonghuaProvider : MainAPI() {
     // NOTE: Previously the code was filtering OUT series URLs by mistake.
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // URL-encode the query for safety, converting spaces to %20
         val encoded = java.net.URLEncoder.encode(query.trim(), "utf-8").replace("+", "%20")
         val doc = app.get(
             "$mainUrl/busquedas/$encoded",
             headers = mapOf("User-Agent" to USER_AGENT)
         ).document
 
-        return doc.select("div.item").mapNotNull { el ->
-            val anchor = el.selectFirst("a.angled-img, a") ?: return@mapNotNull null
-            val href   = anchor.absUrl("href").ifBlank { return@mapNotNull null }
-            // /busquedas/ returns series pages — keep all results
-            el.toSearchResult()
-        }
+        return doc.select("div.item").mapNotNull { it.toSearchResult() }
     }
 
     // ── Load ──────────────────────────────────────────────────────────────────
