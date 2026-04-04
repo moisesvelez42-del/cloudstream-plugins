@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Watch donghua with English, Spanish & Chinese subtitles"
