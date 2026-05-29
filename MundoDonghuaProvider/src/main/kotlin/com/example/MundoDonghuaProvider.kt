@@ -26,11 +26,24 @@ class MundoDonghuaProvider : MainAPI() {
     private val cloudflareKiller = CloudflareKiller()
 
     private suspend fun getDocument(url: String): org.jsoup.nodes.Document {
-        return app.get(url, headers = mapOf(
+        val requestHeaders = mapOf(
             "User-Agent" to USER_AGENT,
+            "Referer" to "https://www.mundodonghua.com/",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8"
-        ), interceptor = cloudflareKiller).document
+            "Accept-Language" to "es-ES,es;q=0.9"
+        )
+
+        var response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
+
+        // Retry on 403/503 or Cloudflare challenge HTML
+        if (response.code == 403 || response.code == 503 ||
+            response.document.title().contains("Just a moment", ignoreCase = true) ||
+            response.document.title().contains("Cloudflare", ignoreCase = true)) {
+            Thread.sleep(2500) // 2.5 seconds delay
+            response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
+        }
+
+        return response.document
     }
 
     override val mainPage = mainPageOf(
@@ -232,11 +245,7 @@ class MundoDonghuaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(
-            data,
-            referer = mainUrl,
-            headers = mapOf("User-Agent" to USER_AGENT)
-        ).document
+        val doc = getDocument(data)
         var found = false
 
         // Múltiples selectores para servidores
