@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class MundoDonghuaProvider : MainAPI() {
 
@@ -56,12 +58,12 @@ class MundoDonghuaProvider : MainAPI() {
         }
         
         return try {
-            val requestBody = JSONObject().apply {
+            val requestData = JSONObject().apply {
                 put("cmd", "request.get")
                 put("url", url)
                 put("maxTimeout", 60000)
                 put("session", "cloudstream_mundodonghua")
-            }.toString()
+            }
             
             val response = app.post(
                 FLARESOLVERR_URL,
@@ -69,7 +71,7 @@ class MundoDonghuaProvider : MainAPI() {
                     "Content-Type" to "application/json",
                     "Accept" to "application/json"
                 ),
-                data = requestBody
+                requestBody = requestData.toString().toRequestBody("application/json".toMediaTypeOrNull())
             )
             
             if (response.code == 200) {
