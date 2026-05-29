@@ -3,6 +3,7 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import org.json.JSONObject
 
 class MundoDonghuaProvider : MainAPI() {
 
@@ -18,7 +19,110 @@ class MundoDonghuaProvider : MainAPI() {
     )
 
     companion object {
-        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        
+        // Configuración de FlareSolverr
+        // Cambia esta URL a tu instancia de FlareSolverr
+        // Por defecto: http://localhost:8191/v1
+        private const val FLARESOLVERR_URL = "http://localhost:8191/v1"
+        private const val USE_FLARESOLVERR = true // Cambia a false para desactivar FlareSolverr
+        
+        // Indicadores de Cloudflare
+        private val CLOUDFLARE_INDICATORS = listOf(
+            "cf-browser-verification",
+            "cf-challenge",
+            "Checking your browser",
+            "challenges.cloudflare.com",
+            "cloudflare",
+            "turnstile",
+            "cf-im-under-attack",
+            "__cf_bm",
+            "cf_clearence"
+        )
+    }
+
+    // Función auxiliar para verificar si la respuesta es de Cloudflare
+    private fun isCloudflareResponse(body: String): Boolean {
+        val bodyLower = body.lowercase()
+        return CLOUDFLARE_INDICATORS.any { indicator ->
+            bodyLower.contains(indicator.lowercase())
+        }
+    }
+
+    // Función para hacer peticiones a través de FlareSolverr
+    private suspend fun requestViaFlareSolverr(url: String): String? {
+        if (!USE_FLARESOLVERR) {
+            return null
+        }
+        
+        return try {
+            val requestBody = JSONObject().apply {
+                put("cmd", "request.get")
+                put("url", url)
+                put("maxTimeout", 60000)
+                put("session", "cloudstream_mundodonghua")
+            }.toString()
+            
+            val response = app.post(
+                FLARESOLVERR_URL,
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept" to "application/json"
+                ),
+                requestBody = requestBody
+            )
+            
+            if (response.code == 200) {
+                val jsonResponse = JSONObject(response.text)
+                val status = jsonResponse.optString("status", "unknown")
+                
+                if (status == "ok") {
+                    val solution = jsonResponse.getJSONObject("solution")
+                    solution.getString("response")
+                } else {
+                    val message = jsonResponse.optString("message", "Error desconocido")
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // Función para obtener el documento con fallback a FlareSolverr
+    private suspend fun getDocument(url: String): org.jsoup.nodes.Document {
+        // Intentar petición normal primero
+        val normalResponse = try {
+            app.get(url, headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8"
+            ))
+        } catch (e: Exception) {
+            null
+        }
+        
+        // Si la petición normal funciona y no es Cloudflare, usarla
+        if (normalResponse != null && normalResponse.code == 200) {
+            val body = normalResponse.text
+            // Verificar si es una página de Cloudflare
+            if (!isCloudflareResponse(body)) {
+                return org.jsoup.Jsoup.parse(body, url)
+            }
+        }
+        
+        // Si llegamos aquí, necesitamos FlareSolverr
+        if (USE_FLARESOLVERR) {
+            val flaresolverrResponse = requestViaFlareSolverr(url)
+            if (flaresolverrResponse != null) {
+                return org.jsoup.Jsoup.parse(flaresolverrResponse, url)
+            }
+        }
+        
+        // Si todo falla, lanzar excepción
+        throw Exception("No se pudo acceder a la página (posiblemente bloqueada por Cloudflare). Asegúrate de que FlareSolverr esté corriendo en $FLARESOLVERR_URL")
     }
 
     override val mainPage = mainPageOf(
@@ -26,10 +130,7 @@ class MundoDonghuaProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(
-            request.data,
-            headers = mapOf("User-Agent" to USER_AGENT)
-        ).document
+        val doc = getDocument(request.data)
 
         val homeItems = mutableListOf<SearchResponse>()
 
@@ -96,7 +197,7 @@ class MundoDonghuaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/busquedas/${query.encodeUri()}"
-        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
+        val doc = getDocument(url)
 
         val results = mutableListOf<SearchResponse>()
 
@@ -111,7 +212,7 @@ class MundoDonghuaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
+        val doc = getDocument(url)
 
         // Extraer título
         val title = doc.selectFirst("h1, .title, .entry-title, .anime-title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
