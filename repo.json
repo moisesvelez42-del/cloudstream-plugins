@@ -1,7 +1,7 @@
 {
   "name": "Moises Plugins",
   "description": "Plugins de anime",
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "pluginLists": [
     "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/plugins.json"
   ]
