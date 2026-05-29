@@ -18,19 +18,30 @@ class MundoDonghuaProvider : MainAPI() {
     )
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+
+    // Headers más completos para simular un navegador real
+    private fun getHeaders() = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language" to "es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Accept-Encoding" to "gzip, deflate, br",
+        "DNT" to "1",
+        "Connection" to "keep-alive",
+        "Upgrade-Insecure-Requests" to "1",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "none",
+        "Cache-Control" to "max-age=0"
+    )
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Últimos Episodios",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(
-            request.data,
-            headers = mapOf("User-Agent" to USER_AGENT)
-        ).document
+        val doc = app.get(request.data, headers = getHeaders()).document
 
         val homeItems = mutableListOf<SearchResponse>()
 
@@ -97,10 +108,7 @@ class MundoDonghuaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/busquedas/${query.encodeUri()}"
-        val doc = app.get(
-            url,
-            headers = mapOf("User-Agent" to USER_AGENT)
-        ).document
+        val doc = app.get(url, headers = getHeaders()).document
 
         val results = mutableListOf<SearchResponse>()
 
@@ -115,10 +123,7 @@ class MundoDonghuaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(
-            url,
-            headers = mapOf("User-Agent" to USER_AGENT)
-        ).document
+        val doc = app.get(url, headers = getHeaders()).document
 
         // Extraer título
         val title = doc.selectFirst("h1, .title, .entry-title, .anime-title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
@@ -233,7 +238,7 @@ class MundoDonghuaProvider : MainAPI() {
         val doc = app.get(
             data,
             referer = mainUrl,
-            headers = mapOf("User-Agent" to USER_AGENT)
+            headers = getHeaders()
         ).document
         var found = false
 
