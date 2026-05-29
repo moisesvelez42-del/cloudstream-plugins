@@ -34,32 +34,21 @@ class MundoDonghuaProvider : MainAPI() {
         
         val homeItems = mutableListOf<SearchResponse>()
         
-        // Selectores específicos basados en la estructura real del sitio
-        doc.select(".row > .col-6, .row > .col-md-3, .row > .col-lg-3, .col-6, .col-md-3, .col-lg-3").forEach { element ->
-            val result = element.toSearchResult()
+        // Buscar en la estructura del sitio
+        doc.select(".row > div, .col-6, .col-md-3, .col-lg-3, .item, .card").forEach { element ->
+            val anchor = element.selectFirst("a[href*='/donghua/'], a[href*='/pelicula/']") 
+                ?: element.selectFirst("a") 
+                ?: return@forEach
+            
+            val result = anchor.toSearchResultFromAnchor()
             if (result != null && homeItems.none { it.url == result.url }) {
                 homeItems.add(result)
-            }
-        }
-        
-        // Fallback: buscar cualquier elemento que tenga un enlace a /donghua/ o /pelicula/
-        if (homeItems.isEmpty()) {
-            doc.select("a[href*='/donghua/'], a[href*='/pelicula/']").forEach { element ->
-                val result = element.toSearchResultFromAnchor()
-                if (result != null && homeItems.none { it.url == result.url }) {
-                    homeItems.add(result)
-                }
             }
         }
 
         return newHomePageResponse(request.name, homeItems, hasNext = false)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = selectFirst("a") ?: return null
-        return anchor.toSearchResultFromAnchor()
-    }
-    
     private fun Element.toSearchResultFromAnchor(): SearchResponse? {
         val href = attr("href")?.trim() ?: return null
         if (href.isBlank()) return null
@@ -70,25 +59,44 @@ class MundoDonghuaProvider : MainAPI() {
             else -> "$mainUrl/$href"
         }
         
+        // Solo URLs de donghua o pelicula
         if (!url.contains("/donghua/") && !url.contains("/pelicula/")) return null
 
+        // Extraer nombre
         val name = selectFirst("img")?.attr("alt")?.trim()
+            ?: selectFirst(".title, .name, h3, h2")?.text()?.trim()
             ?: text()?.trim()?.lines()?.firstOrNull()?.trim()
             ?: return null
         
+        // Limpiar nombre
         val cleanName = name
             .replace(Regex("""Episodio\s*\d+""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\d{2}-\d{2}-\d{4}"""), "")
             .replace(Regex("""\d{1,3}(,\d{3})*"""), "")
             .trim()
 
-        val poster = selectFirst("img")?.let { img ->
-            img.attr("data-src").ifBlank { img.attr("src") }
+        // Extraer imagen desde múltiples fuentes
+        var poster = selectFirst("img")?.let { img ->
+            img.attr("data-src").ifBlank { 
+                img.attr("src").ifBlank {
+                    img.attr("data-original")
+                }
+            }
+        }
+        
+        // Si no hay imagen en el elemento, buscar en el padre
+        if (poster.isNullOrBlank()) {
+            poster = parent()?.selectFirst("img")?.let { img ->
+                img.attr("data-src").ifBlank { 
+                    img.attr("src").ifBlank {
+                        img.attr("data-original")
+                    }
+                }
+            }
         }
 
         val type = when {
             url.contains("/pelicula/") -> TvType.Movie
-            url.contains("/donghua/") -> TvType.Anime
             else -> TvType.Anime
         }
 
@@ -112,19 +120,14 @@ class MundoDonghuaProvider : MainAPI() {
         
         val results = mutableListOf<SearchResponse>()
         
-        doc.select(".row .col-6, .row .col-md-4, .item, .card, .search-result").forEach { element ->
-            val result = element.toSearchResult()
+        doc.select(".row > div, .col-6, .col-md-4, .item, .card").forEach { element ->
+            val anchor = element.selectFirst("a[href*='/donghua/'], a[href*='/pelicula/']") 
+                ?: element.selectFirst("a") 
+                ?: return@forEach
+            
+            val result = anchor.toSearchResultFromAnchor()
             if (result != null && results.none { it.url == result.url }) {
                 results.add(result)
-            }
-        }
-        
-        if (results.isEmpty()) {
-            doc.select("a[href*='/donghua/'], a[href*='/pelicula/']").forEach { element ->
-                val result = element.toSearchResultFromAnchor()
-                if (result != null && results.none { it.url == result.url }) {
-                    results.add(result)
-                }
             }
         }
         
@@ -137,37 +140,52 @@ class MundoDonghuaProvider : MainAPI() {
             headers = mapOf("User-Agent" to USER_AGENT)
         ).document
         
-        val title = doc.selectFirst("h1, .title, .entry-title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
+        // Extraer título
+        val title = doc.selectFirst("h1, .title, .entry-title, .anime-title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
             ?: return null
         
-        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-            ?: doc.selectFirst(".anime-cover img, .poster img, .thumb img")?.attr("src")
+        // Extraer poster desde múltiples fuentes
+        var poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+        if (poster.isNullOrBlank()) {
+            poster = doc.selectFirst(".anime-cover img, .poster img, .thumb img, .cover img")?.let { img ->
+                img.attr("data-src").ifBlank { 
+                    img.attr("src").ifBlank {
+                        img.attr("data-original")
+                    }
+                }
+            }
+        }
         
-        val plot = doc.selectFirst(".sinopsis, .description, .plot, meta[name='description'], .summary")?.let {
+        // Extraer sinopsis
+        val plot = doc.selectFirst(".sinopsis, .description, .plot, meta[name='description'], .summary, .synopsis")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text().trim()
         }?.takeIf { it.isNotBlank() }
         
-        val genres = doc.select(".generos a, .genres a, .tags a, .genre, .sgeneros a").map { 
+        // Extraer géneros
+        val genres = doc.select(".generos a, .genres a, .tags a, .genre, .sgeneros a, .categories a").map { 
             it.text().trim() 
         }.filter { it.isNotBlank() }
         
-        val year = doc.selectFirst(".year, .info-item:contains(Año), [class*='year'], .date")?.text()
+        // Extraer año
+        val year = doc.selectFirst(".year, .info-item:contains(Año), [class*='year'], .date, .release-year")?.text()
             ?.filter { it.isDigit() }?.take(4)?.toIntOrNull()
 
-        val statusText = doc.selectFirst(".status, .info-item:contains(Estado), [class*='status'], .airing")?.text()?.lowercase() ?: ""
+        // Extraer estado
+        val statusText = doc.selectFirst(".status, .info-item:contains(Estado), [class*='status'], .airing, .anime-status")?.text()?.lowercase() ?: ""
         val showStatus = when {
             statusText.contains("emisión") || statusText.contains("ongoing") || statusText.contains("airing") -> ShowStatus.Ongoing
             statusText.contains("finalizado") || statusText.contains("completed") || statusText.contains("finished") -> ShowStatus.Completed
             else -> ShowStatus.Completed
         }
 
+        // Determinar tipo
         val type = when {
             url.contains("/pelicula/") -> TvType.Movie
             url.contains("/donghua/") -> TvType.Anime
-            url.contains("/ver/") -> TvType.Anime
             else -> TvType.Anime
         }
 
+        // Si es película, retornar directamente
         if (type == TvType.Movie) {
             return newMovieLoadResponse(title, url, type, url) {
                 this.posterUrl = poster
@@ -177,47 +195,46 @@ class MundoDonghuaProvider : MainAPI() {
             }
         }
 
+        // Extraer episodios
         val episodes = mutableListOf<Episode>()
         
-        val episodeSelectors = listOf(
-            ".lista-episodios a",
-            ".episodes-list a", 
-            ".episode a",
-            ".episodios a",
-            ".ep-list a",
-            ".episodio a",
-            "ul.episodes li a",
-            ".tab-content a[href*='/ver/']"
-        )
-        
-        for (selector in episodeSelectors) {
-            doc.select(selector).forEach { epLink ->
-                val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
-                if (epUrl.isBlank() || !epUrl.contains(mainUrl)) return@forEach
-                
-                if (episodes.any { it.data == epUrl }) return@forEach
-                
-                val epText = epLink.text().trim()
-                
-                val epNum = Regex("""Episodio\s*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("""(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("""episodio[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("""\d+\s*x\s*(\d+)""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                
-                val season = Regex("""-(\d+)/ver/|temporada[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epUrl)?.let {
-                    it.groupValues.get(1).toIntOrNull() ?: it.groupValues.get(2).toIntOrNull()
-                } ?: 1
-
-                val name = if (epNum != null) "Episodio $epNum" else epText.ifBlank { "Episodio" }
-
-                episodes.add(newEpisode(epUrl) {
-                    this.name = name
-                    this.season = season
-                    this.episode = epNum ?: 1
-                })
-            }
+        // Buscar en la página de detalle enlaces a episodios
+        doc.select("a[href*='/ver/']").forEach { epLink ->
+            val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
+            if (epUrl.isBlank() || !epUrl.contains(mainUrl)) return@forEach
             
-            if (episodes.isNotEmpty()) break
+            // Evitar duplicados
+            if (episodes.any { it.data == epUrl }) return@forEach
+            
+            val epText = epLink.text().trim()
+            
+            // Extraer número de episodio
+            val epNum = Regex("""Episodio\s*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""episodio[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
+            
+            // Extraer temporada de la URL
+            val season = Regex("""-(\d+)/ver/|temporada[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epUrl)?.let {
+                it.groupValues.get(1).toIntOrNull() ?: it.groupValues.get(2).toIntOrNull()
+            } ?: 1
+
+            val name = if (epNum != null) "Episodio $epNum" else epText.ifBlank { "Episodio" }
+
+            episodes.add(newEpisode(epUrl) {
+                this.name = name
+                this.season = season
+                this.episode = epNum ?: 1
+            })
+        }
+        
+        // Si no encontramos episodios, crear uno genérico apuntando a la URL actual
+        // Esto permite reproducir desde la página de detalle
+        if (episodes.isEmpty()) {
+            episodes.add(newEpisode(url) {
+                this.name = "Ver ahora"
+                this.season = 1
+                this.episode = 1
+            })
         }
 
         return newAnimeLoadResponse(title, url, type) {
@@ -243,35 +260,7 @@ class MundoDonghuaProvider : MainAPI() {
         ).document
         var found = false
 
-        val serverSelectors = listOf(
-            ".servidores li",
-            ".options li", 
-            ".players li",
-            ".server-list li",
-            ".episode-servers li",
-            ".server-item",
-            ".video-option",
-            "[data-server]"
-        )
-        
-        for (selector in serverSelectors) {
-            doc.select(selector).forEach { server ->
-                val dataUrl = server.attr("data-url").ifBlank { 
-                    server.attr("data-src").ifBlank {
-                        server.attr("data-link").ifBlank {
-                            server.selectFirst("a")?.attr("href")
-                        }
-                    }
-                }
-                
-                if (!dataUrl.isNullOrBlank() && (dataUrl.startsWith("http") || dataUrl.startsWith("//"))) {
-                    val fullUrl = if (dataUrl.startsWith("//")) "https:$dataUrl" else dataUrl
-                    loadExtractor(fullUrl, data, subtitleCallback, callback)
-                    found = true
-                }
-            }
-        }
-
+        // Buscar iframes de reproductores
         doc.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
@@ -281,10 +270,21 @@ class MundoDonghuaProvider : MainAPI() {
             }
         }
 
+        // Buscar videos directos
         doc.select("video source").forEach { source ->
             val src = source.attr("src")
             if (src.isNotBlank()) {
                 loadExtractor(src, data, subtitleCallback, callback)
+                found = true
+            }
+        }
+        
+        // Buscar enlaces de servidores
+        doc.select("a[href*='.m3u8'], a[href*='.mp4']").forEach { link ->
+            val href = link.attr("href")
+            if (href.isNotBlank()) {
+                val fullUrl = if (href.startsWith("//")) "https:$href" else href
+                loadExtractor(fullUrl, data, subtitleCallback, callback)
                 found = true
             }
         }

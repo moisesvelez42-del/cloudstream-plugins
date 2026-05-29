@@ -1,4 +1,4 @@
-version = 3
+version = 4
 
 cloudstream {
     description = "Extensión para MundoDonghua - Donghuas en español"
@@ -16,7 +16,7 @@ cloudstream {
     // Anime / Donghua content
     tvTypes = listOf("Anime", "TvSeries", "Movie")
 
-    iconUrl = "https://www.mundodonghua.com/favicon.ico"
+    iconUrl = "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/MundoDonghuaProvider.png"
 }
 
 android {
