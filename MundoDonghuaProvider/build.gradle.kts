@@ -1,4 +1,4 @@
-version = 4
+version = 5
 
 cloudstream {
     description = "Extensión para MundoDonghua - Donghuas en español"
