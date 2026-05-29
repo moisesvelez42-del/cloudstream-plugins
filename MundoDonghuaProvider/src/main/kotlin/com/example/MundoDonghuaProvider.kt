@@ -2,8 +2,6 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.RequestsFactory.haveKiller
-import com.lagradost.cloudstream3.RequestsFactory.getKiller
 import org.jsoup.nodes.Element
 
 class MundoDonghuaProvider : MainAPI() {
@@ -25,22 +23,15 @@ class MundoDonghuaProvider : MainAPI() {
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-    private suspend fun getDoc(url: String): org.jsoup.nodes.Document {
-        if (haveKiller) {
-            getKiller(url)
-        }
-        return app.get(url, headers = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Accept-Language" to "es-ES,es;q=0.9"
-        )).document
-    }
-
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Últimos Episodios",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = getDoc(request.data)
+        val doc = app.get(
+            request.data,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
         
         val homeItems = mutableListOf<SearchResponse>()
         
@@ -84,24 +75,23 @@ class MundoDonghuaProvider : MainAPI() {
             else -> TvType.Anime
         }
 
-        val quality = selectFirst(".quality, .badge")?.text()?.filter { it.isDigit() }?.take(3)?.toIntOrNull()
-
         return if (type == TvType.Movie) {
             newMovieSearchResponse(name, url, type) {
                 this.posterUrl = poster
-                this.quality = quality
             }
         } else {
             newAnimeSearchResponse(name, url, type) {
                 this.posterUrl = poster
-                this.quality = quality
             }
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/busquedas/${query.encodeUri()}"
-        val doc = getDoc(url)
+        val doc = app.get(
+            url,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
         
         return doc.select(".grid-items .item, .search-results .item, .anime-list .item, .row .col-6").mapNotNull {
             it.toSearchResult()
@@ -109,7 +99,10 @@ class MundoDonghuaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = getDoc(url)
+        val doc = app.get(
+            url,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
         
         val title = doc.selectFirst("h1, .title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
             ?: return null
@@ -177,7 +170,7 @@ class MundoDonghuaProvider : MainAPI() {
         if (episodes.isEmpty()) {
             doc.select(".col-6, .episode-card").forEachIndexed { index, epCard ->
                 val epLink = epCard.selectFirst("a")
-                val epUrl = epLink?.absUrl("href").ifBlank { epLink?.attr("href") } ?: return@forEachIndexed
+                val epUrl = epLink?.absUrl("href")?.ifBlank { epLink?.attr("href") } ?: return@forEachIndexed
                 if (epUrl.isBlank() || !epUrl.contains(mainUrl)) return@forEachIndexed
                 
                 val epText = epCard.text().trim()
@@ -206,7 +199,11 @@ class MundoDonghuaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = getDoc(data)
+        val doc = app.get(
+            data,
+            referer = mainUrl,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
         var found = false
 
         doc.select(".servidores li, .options li, .players li, .server-list li, .episode-servers li").forEach { server ->
@@ -215,11 +212,7 @@ class MundoDonghuaProvider : MainAPI() {
             }
             if (!dataUrl.isNullOrBlank() && (dataUrl.startsWith("http") || dataUrl.startsWith("//"))) {
                 val fullUrl = if (dataUrl.startsWith("//")) "https:$dataUrl" else dataUrl
-                val serverName = server.selectFirst(".name, span")?.text()?.trim() 
-                    ?: server.text().split(" ").firstOrNull()
-                    ?: "Server"
-                
-                extractLink(fullUrl, serverName, data, callback)
+                loadExtractor(fullUrl, data, subtitleCallback, callback)
                 found = true
             }
         }
@@ -228,7 +221,7 @@ class MundoDonghuaProvider : MainAPI() {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
                 val fullUrl = if (src.startsWith("//")) "https:$src" else src
-                extractLink(fullUrl, "Iframe", data, callback)
+                loadExtractor(fullUrl, data, subtitleCallback, callback)
                 found = true
             }
         }
@@ -236,72 +229,12 @@ class MundoDonghuaProvider : MainAPI() {
         doc.select("video source").forEach { source ->
             val src = source.attr("src")
             if (src.isNotBlank()) {
-                callback(
-                    ExtractorLink(
-                        source = "Direct",
-                        name = "Direct Video",
-                        url = src,
-                        referer = data,
-                        quality = QueryQualityPolicy.CONTAINER_QUALITY,
-                        type = ExtractorLinkType.M3U8
-                    )
-                )
+                loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
         }
 
         return found
-    }
-
-    private fun extractLink(url: String, name: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        try {
-            when {
-                url.contains("voe") -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-                url.contains("streamwish") || url.contains("wish") -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-                url.contains("tamamo") || url.contains("tamamus") -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-                url.contains("fm") || url.contains("fads") -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-                url.contains("asura") -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-                url.contains(".m3u8") -> {
-                    callback(
-                        ExtractorLink(
-                            source = name,
-                            name = name,
-                            url = url,
-                            referer = referer,
-                            quality = QueryQualityPolicy.CONTAINER_QUALITY,
-                            type = ExtractorLinkType.M3U8
-                        )
-                    )
-                }
-                url.contains(".mp4") -> {
-                    callback(
-                        ExtractorLink(
-                            source = name,
-                            name = name,
-                            url = url,
-                            referer = referer,
-                            quality = QueryQualityPolicy.CONTAINER_QUALITY,
-                            type = ExtractorLinkType.MP4
-                        )
-                    )
-                }
-                else -> {
-                    loadExtractor(url, referer, callback = callback)
-                }
-            }
-        } catch (e: Exception) {
-            Log.d("MundoDonghua", "Error extracting $name: ${e.message}")
-        }
     }
 
     private fun String.encodeUri(): String =
