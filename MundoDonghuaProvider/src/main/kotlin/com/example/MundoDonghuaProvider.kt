@@ -69,7 +69,7 @@ class MundoDonghuaProvider : MainAPI() {
                     "Content-Type" to "application/json",
                     "Accept" to "application/json"
                 ),
-                requestBody = requestBody
+                data = requestBody
             )
             
             if (response.code == 200) {
