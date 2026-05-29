@@ -2,7 +2,6 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addEpisodes
 import org.jsoup.nodes.Element
 
 class MundoDonghuaProvider : MainAPI() {
@@ -11,19 +10,24 @@ class MundoDonghuaProvider : MainAPI() {
     override var name = "MundoDonghua"
     override var lang = "es"
     override val hasMainPage = true
-    override val hasQuickSearch = true
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.TvSeries,
         TvType.Movie
     )
 
+    companion object {
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Últimos Agregados",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(request.data, interceptor = appUtils.cloudflareKiller.getInterceptor()).document
+        val doc = app.get(request.data, headers = mapOf("User-Agent" to USER_AGENT)).document
         val items = doc.select(".lista-episodios .item, .recent-episodes .item, .grid-items .item").mapNotNull {
             it.toSearchResult()
         }
@@ -53,14 +57,14 @@ class MundoDonghuaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/busquedas/${query.encodeUri()}"
-        val doc = app.get(url, interceptor = appUtils.cloudflareKiller.getInterceptor()).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
         return doc.select(".grid-items .item, .search-results .item").mapNotNull {
             it.toSearchResult()
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url, interceptor = appUtils.cloudflareKiller.getInterceptor()).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
         
         val title = doc.selectFirst("h1")?.text()?.trim() ?: return null
         val poster = doc.selectFirst("meta[property=\"og:image\"]")?.attr("content")
@@ -75,9 +79,9 @@ class MundoDonghuaProvider : MainAPI() {
         
         val statusText = doc.selectFirst(".status, .info-item:contains(Estado)")?.text()?.lowercase() ?: ""
         val status = if (statusText.contains("en emisión") || statusText.contains("ongoing")) {
-            TvStatus.Ongoing
+            ShowStatus.Ongoing
         } else {
-            TvStatus.Completed
+            ShowStatus.Completed
         }
 
         val type = if (url.contains("/pelicula/")) TvType.Movie else TvType.Anime
@@ -120,7 +124,7 @@ class MundoDonghuaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, interceptor = appUtils.cloudflareKiller.getInterceptor()).document
+        val doc = app.get(data, headers = mapOf("User-Agent" to USER_AGENT)).document
         var found = false
 
         for (li in doc.select(".servidores li, .options li, .players li")) {
@@ -133,7 +137,7 @@ class MundoDonghuaProvider : MainAPI() {
 
         for (iframe in doc.select("iframe")) {
             val src = iframe.attr("src")
-            if (src != null && src.startsWith("http")) {
+            if (src.isNotBlank() && src.startsWith("http")) {
                 loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
