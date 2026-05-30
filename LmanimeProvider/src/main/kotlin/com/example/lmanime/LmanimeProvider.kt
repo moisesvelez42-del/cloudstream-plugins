@@ -191,6 +191,45 @@ class LmanimeProvider : MainAPI() {
         val doc = getDocument(data)
         var found = false
 
+        // Fetch servers from the dropdown options usually found in the native web player
+        doc.select("select option[value*=/v/], option[data-index]").forEach { option ->
+            val serverName = option.text().trim()
+            val vUrl = option.attr("value")
+            if (vUrl.isNotBlank() && vUrl.startsWith("http")) {
+                try {
+                    val vDoc = getDocument(vUrl)
+                    vDoc.select("iframe").forEach { iframe ->
+                        val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
+                        if (src.isNotBlank() && src.startsWith("http")) {
+                            loadExtractor(src, data, subtitleCallback) { link ->
+                                // Appending the original server language explicit name to the extractor name
+                                val newName = if (serverName.isNotBlank() && serverName != "Select Video Server") {
+                                    "$serverName - ${link.name}"
+                                } else link.name
+
+                                // Data class copy to avoid constructor breaking changes
+                                callback(
+                                    ExtractorLink(
+                                        link.source,
+                                        newName,
+                                        link.url,
+                                        link.referer,
+                                        link.quality,
+                                        link.type,
+                                        link.headers,
+                                        link.extractorData
+                                    )
+                                )
+                            }
+                            found = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Ignore failures on individual server checks
+                }
+            }
+        }
+
         val serverLinks = mutableListOf<String>()
 
         // Find standard iframes

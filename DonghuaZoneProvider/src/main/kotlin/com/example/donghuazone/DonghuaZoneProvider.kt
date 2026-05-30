@@ -51,7 +51,7 @@ class DonghuaZoneProvider : MainAPI() {
         val doc = getDocument(pagedUrl)
 
         val homeItems = mutableListOf<SearchResponse>()
-        doc.select("article.post, div.post-outer").forEach { element ->
+        doc.select("article.post-outer-container, article.post, div.post-outer, div.item").forEach { element ->
             val result = element.toSearchResult()
             if (result != null && homeItems.none { it.url == result.url }) {
                 homeItems.add(result)
@@ -72,7 +72,7 @@ class DonghuaZoneProvider : MainAPI() {
             aTag.attr("title").ifBlank { selectFirst(".post-title")?.text()?.trim() } 
         } ?: ""
 
-        val imgTag = selectFirst(".post-body img, .post-thumbnail img, .post-image img")
+        val imgTag = selectFirst("img, .post-body img, .post-thumbnail img, .post-image img")
         val poster = imgTag?.attr("data-src")?.ifBlank { imgTag.attr("src") }
         
         val qualityLabel = selectFirst("a.label, span.label")?.text()
@@ -101,7 +101,7 @@ class DonghuaZoneProvider : MainAPI() {
         val doc = getDocument("$mainUrl/search?q=label:Series+${query.encodeUri()}&max-results=10")
         
         val results = mutableListOf<SearchResponse>()
-        doc.select("article.post, div.post-outer").forEach { element ->
+        doc.select("article.post-outer-container, article.post, div.post-outer, div.item").forEach { element ->
             val result = element.toSearchResult()
             if (result != null && results.none { it.url == result.url }) {
                 results.add(result)
