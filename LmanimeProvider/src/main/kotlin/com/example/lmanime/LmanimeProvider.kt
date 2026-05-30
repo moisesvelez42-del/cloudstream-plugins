@@ -191,44 +191,26 @@ class LmanimeProvider : MainAPI() {
         val doc = getDocument(data)
         var found = false
 
-        // Fetch servers from the dropdown options usually found in the native web player
-        doc.select("select option[value*=/v/], option[data-index]").forEach { option ->
+        // Fetch servers from the dropdown options (select element on Lmanime page)
+        val options = doc.select("select option[value*=/v/], option[data-index]")
+        for (option in options) {
             val serverName = option.text().trim()
             val vUrl = option.attr("value")
-            if (vUrl.isNotBlank() && vUrl.startsWith("http")) {
-                try {
-                    val vDoc = getDocument(vUrl)
-                    vDoc.select("iframe").forEach { iframe ->
-                        val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                        if (src.isNotBlank() && src.startsWith("http")) {
-                            loadExtractor(src, data, subtitleCallback) { link ->
-                                // Appending the original server language explicit name to the extractor name
-                                val newName = if (serverName.isNotBlank() && serverName != "Select Video Server") {
-                                    "$serverName - ${link.name}"
-                                } else link.name
-
-                                // Data class copy to avoid constructor breaking changes
-                                callback(
-                                    ExtractorLink(
-                                        link.source,
-                                        newName,
-                                        link.url,
-                                        link.referer,
-                                        link.quality,
-                                        link.type,
-                                        link.headers,
-                                        link.extractorData
-                                    )
-                                )
-                            }
-                            found = true
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Ignore failures on individual server checks
+            if (vUrl.isBlank() || !vUrl.startsWith("http")) continue
+            try {
+                val vDoc = getDocument(vUrl)
+                val iframes = vDoc.select("iframe")
+                for (iframe in iframes) {
+                    val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
+                    if (src.isBlank() || !src.startsWith("http")) continue
+                    loadExtractor(src, data, subtitleCallback, callback)
+                    found = true
                 }
+            } catch (e: Exception) {
+                // Ignore failures on individual server
             }
         }
+
 
         val serverLinks = mutableListOf<String>()
 
@@ -267,7 +249,7 @@ class LmanimeProvider : MainAPI() {
             val src = track.attr("src")
             val lang = track.attr("srclang").ifBlank { track.attr("label") }.ifBlank { "es" }
             if (src.isNotBlank()) {
-                subtitleCallback(SubtitleFile(lang, src))
+                subtitleCallback(newSubtitleFile(lang, src))
             }
         }
         
@@ -281,7 +263,7 @@ class LmanimeProvider : MainAPI() {
                     subRegex.findAll(content).forEach { match ->
                         val url = match.groupValues[1]
                         val lang = match.groupValues[2]
-                        subtitleCallback(SubtitleFile(lang, url))
+                        subtitleCallback(newSubtitleFile(lang, url))
                     }
                 } catch (e: Exception) {
                     // Ignore

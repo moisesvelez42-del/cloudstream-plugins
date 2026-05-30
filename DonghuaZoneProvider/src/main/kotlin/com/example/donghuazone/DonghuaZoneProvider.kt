@@ -212,7 +212,7 @@ class DonghuaZoneProvider : MainAPI() {
             val src = track.attr("src")
             val lang = track.attr("srclang").ifBlank { track.attr("label") }.ifBlank { "English" } // o es, id, pt
             if (src.isNotBlank()) {
-                subtitleCallback(SubtitleFile(lang, src))
+                subtitleCallback(newSubtitleFile(lang, src))
             }
         }
 
@@ -225,7 +225,7 @@ class DonghuaZoneProvider : MainAPI() {
                     subRegex.findAll(content).forEach { match ->
                         val url = match.groupValues[1]
                         val lang = match.groupValues[2]
-                        subtitleCallback(SubtitleFile(lang, url))
+                        subtitleCallback(newSubtitleFile(lang, url))
                     }
                 } catch (e: Exception) {
                     // Ignore
