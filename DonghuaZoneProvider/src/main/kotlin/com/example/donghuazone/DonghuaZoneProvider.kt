@@ -1,10 +1,10 @@
 package com.example.donghuazone
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 
 class DonghuaZoneProvider : MainAPI() {
 
@@ -19,70 +19,159 @@ class DonghuaZoneProvider : MainAPI() {
         TvType.Movie
     )
 
+    companion object {
+        private const val TAG = "DonghuaZone"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private const val MAX_CLOUDFLARE_RETRIES = 3
+    }
+
     private val cloudflareKiller = CloudflareKiller()
 
-    private suspend fun getDocument(url: String): org.jsoup.nodes.Document {
-        val requestHeaders = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer" to "$mainUrl/",
-            "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8,id;q=0.7"
-        )
-        var response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
+    private fun getHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Referer" to "$mainUrl/",
+        "Accept-Language" to "es-ES,es;q=0.9,en;q=0.8,id;q=0.7",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    )
 
-        if (response.code in listOf(403, 503) || 
-            response.document.title().contains("Just a moment", true) ||
-            response.document.title().contains("Cloudflare", true)) {
-            Thread.sleep(2500)
-            response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
+    private suspend fun getDocument(url: String): org.jsoup.nodes.Document? {
+        var lastException: Exception? = null
+        
+        for (attempt in 1..MAX_CLOUDFLARE_RETRIES) {
+            try {
+                Log.d(TAG, "Fetching URL attempt $attempt/$MAX_CLOUDFLARE_RETRIES: $url")
+                
+                val response = app.get(url, headers = getHeaders(), interceptor = cloudflareKiller, timeout = 30000)
+                val document = response.document
+                val title = document.title()
+                
+                Log.d(TAG, "Response code: ${response.code}, title: $title")
+
+                if (response.code in listOf(403, 503, 429) ||
+                    title.contains("Just a moment", ignoreCase = true) ||
+                    title.contains("Cloudflare", ignoreCase = true) ||
+                    title.contains("Checking your browser", ignoreCase = true)) {
+                    
+                    Log.d(TAG, "Cloudflare challenge detected, waiting before retry...")
+                    Thread.sleep(3000)
+                    continue
+                }
+
+                if (document.text().length < 100) {
+                    Log.d(TAG, "Document seems empty or minimal, retrying...")
+                    Thread.sleep(2000)
+                    continue
+                }
+
+                Log.d(TAG, "Successfully fetched document with title: $title")
+                return document
+                
+            } catch (e: Exception) {
+                lastException = e
+                Log.e(TAG, "Exception fetching URL: ${e.message}")
+                if (attempt < MAX_CLOUDFLARE_RETRIES) {
+                    Thread.sleep(2500)
+                }
+            }
         }
-
-        return response.document
+        
+        Log.e(TAG, "Failed to fetch URL after $MAX_CLOUDFLARE_RETRIES attempts, last exception: ${lastException?.message}")
+        return null
     }
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Últimos episodios"
+        "$mainUrl/" to "Últimos episodios",
+        "$mainUrl/search/label/Series?max-results=20" to "Series",
+        "$mainUrl/search/label/Movies?max-results=20" to "Movies"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "$mainUrl/search?updated-max=..." // Blogger pagination is tricky via just page numbers, often start-index is used
-        // Using start-index for paginating simple mainPage
-        val pagedUrl = if (page == 1) mainUrl else "$mainUrl/search?max-results=10&start-index=${(page - 1) * 10 + 1}"
+        val url = if (page == 1) {
+            request.data
+        } else {
+            if (request.data.contains("?")) {
+                "${request.data}&start-index=${((page - 1) * 20) + 1}"
+            } else {
+                "${request.data}?start-index=${((page - 1) * 20) + 1}"
+            }
+        }
         
-        val doc = getDocument(pagedUrl)
+        Log.d(TAG, "getMainPage URL: $url")
+        
+        val doc = getDocument(url) ?: return newHomePageResponse(request.name, emptyList(), false)
 
         val homeItems = mutableListOf<SearchResponse>()
-        doc.select("article.post-outer-container, article.post, div.post-outer, div.item").forEach { element ->
+        
+        doc.select(".post-outer, article.post, div.post, .article, .post-outer-container").forEach { element ->
             val result = element.toSearchResult()
             if (result != null && homeItems.none { it.url == result.url }) {
                 homeItems.add(result)
             }
         }
+        
+        if (homeItems.isEmpty()) {
+            doc.select("a[href*='donghuazone.com']").forEach { link ->
+                val href = link.attr("href")
+                if (href.contains("/20") && href.endsWith(".html")) {
+                    val title = link.text().trim()
+                    if (title.isNotBlank() && title.length > 3) {
+                        val img = link.selectFirst("img")
+                        val poster = img?.attr("src") ?: img?.attr("data-src")
+                        homeItems.add(newAnimeSearchResponse(title, href, TvType.Anime) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            }
+        }
 
-        return newHomePageResponse(request.name, homeItems, hasNext = homeItems.isNotEmpty())
+        Log.d(TAG, "Found ${homeItems.size} items on main page")
+        return newHomePageResponse(request.name, homeItems, hasNext = homeItems.size >= 15)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val aTag = selectFirst("h3.post-title a, h2.post-title a, a.timestamp-link") ?: selectFirst("a") ?: return null
-        val href = aTag.attr("href")
-        if (href.isBlank()) return null
+        val aTag = selectFirst("h3.post-title a, h2.post-title a, .post-title a, a.timestamp-link") 
+            ?: selectFirst("a[href*='.html']") 
+            ?: return null
         
-        val url = if (href.startsWith("http")) href else "$mainUrl$href"
+        val href = aTag.attr("href")
+        if (href.isBlank() || !href.contains("donghuazone.com") && !href.contains("/20")) return null
+        
+        val url = when {
+            href.startsWith("http") -> href
+            href.startsWith("/") -> "$mainUrl$href"
+            else -> "$mainUrl/$href"
+        }
+        
+        if (!url.contains("donghuazone.com") || !url.endsWith(".html")) return null
         
         val title = aTag.text().trim().ifBlank { 
-            aTag.attr("title").ifBlank { selectFirst(".post-title")?.text()?.trim() } 
-        } ?: ""
+            aTag.attr("title").ifBlank { 
+                selectFirst(".post-title")?.text()?.trim() 
+            } 
+        } ?: selectFirst("img")?.attr("alt")?.trim() ?: ""
 
-        val imgTag = selectFirst("img, .post-body img, .post-thumbnail img, .post-image img")
-        val poster = imgTag?.attr("data-src")?.ifBlank { imgTag.attr("src") }
+        if (title.isBlank()) return null
         
-        val qualityLabel = selectFirst("a.label, span.label")?.text()
+        val imgTag = selectFirst("img.post-thumbnail, img.post-image, .post-thumbnail img, .post-image img, img")
+        val poster = imgTag?.attr("data-src")?.ifBlank { 
+            imgTag?.attr("src")?.ifBlank { 
+                imgTag?.attr("data-original") 
+            } 
+        }
+        
+        val qualityLabel = selectFirst(".label, .post-labels a, .labels a")?.text()
         val quality = when {
-            title.contains("4K", true) || (qualityLabel?.contains("4K", true) == true) -> SearchQuality.FourK
-            title.contains("1080p", true) || (qualityLabel?.contains("1080p", true) == true) -> SearchQuality.HD
+            title.contains("4K", true) || qualityLabel?.contains("4K", true) == true -> SearchQuality.FourK
+            title.contains("1080p", true) || qualityLabel?.contains("1080p", true) == true -> SearchQuality.HD
+            title.contains("720p", true) || qualityLabel?.contains("720p", true) == true -> SearchQuality.HD
             else -> null
         }
 
-        val type = if (url.contains("/pelicula/") || title.contains("Movie", true)) TvType.Movie else TvType.Anime
+        val type = when {
+            url.contains("/pelicula/") || url.contains("/movie/") || title.contains("movie", true) -> TvType.Movie
+            else -> TvType.Anime
+        }
         
         return if (type == TvType.Movie) {
             newMovieSearchResponse(title, url, type) {
@@ -98,42 +187,83 @@ class DonghuaZoneProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = getDocument("$mainUrl/search?q=label:Series+${query.encodeUri()}&max-results=10")
+        val searchUrl = "$mainUrl/search?q=${query.encodeUri()}&max-results=20"
+        Log.d(TAG, "Searching with URL: $searchUrl")
         
+        val doc = getDocument(searchUrl) ?: return emptyList()
+
         val results = mutableListOf<SearchResponse>()
-        doc.select("article.post-outer-container, article.post, div.post-outer, div.item").forEach { element ->
+        
+        doc.select(".post-outer, article.post, div.post, .article, .post-outer-container").forEach { element ->
             val result = element.toSearchResult()
             if (result != null && results.none { it.url == result.url }) {
                 results.add(result)
             }
         }
-        return results
-    }
-
-    override suspend fun load(url: String): LoadResponse? {
-        val doc = getDocument(url)
-
-        val title = doc.selectFirst("h1.post-title, h3.post-title")?.text()?.trim() ?: return null
-
-        var poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-        if (poster.isNullOrBlank()) {
-            poster = doc.selectFirst(".post-body img")?.attr("data-src")?.ifBlank {
-                doc.selectFirst(".post-body img")?.attr("src")
+        
+        if (results.isEmpty()) {
+            doc.select("a[href*='donghuazone.com'][href*='.html']").forEach { link ->
+                val href = link.attr("href")
+                if (href.contains("/20") || href.contains("episode") || href.contains("season")) {
+                    val title = link.text().trim()
+                    if (title.isNotBlank() && title.length > 3 && !title.contains("Download")) {
+                        val img = link.selectFirst("img")
+                        val poster = img?.attr("src") ?: img?.attr("data-src")
+                        results.add(newAnimeSearchResponse(title, href, TvType.Anime) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
             }
         }
 
-        val plot = doc.selectFirst(".post-body, .entry-content")?.text()?.trim()
+        Log.d(TAG, "Search found ${results.size} results for query: $query")
+        return results.distinctBy { it.url }
+    }
 
-        val genres = doc.select(".labels a, span.tag a, a[rel='tag']").map { it.text().trim() }
+    override suspend fun load(url: String): LoadResponse? {
+        Log.d(TAG, "Loading URL: $url")
         
-        val statusText = doc.selectFirst(".status, .labels a:contains(Ongoing), .labels a:contains(Completed)")?.text() ?: ""
-        val status = if (statusText.contains("Ongoing", true) || statusText.contains("Updating", true)) {
-            ShowStatus.Ongoing
-        } else if (statusText.contains("Completed", true) || statusText.contains("End", true)) {
-            ShowStatus.Completed
-        } else null
+        val doc = getDocument(url) ?: run {
+            Log.e(TAG, "Failed to load document for URL: $url")
+            return null
+        }
 
-        val type = if (title.contains("Movie", true)) TvType.Movie else TvType.Anime
+        val title = doc.selectFirst("h1.post-title, h3.post-title, .post-title h1, .post-title h3, h1, h2.title")?.text()?.trim()
+            ?: doc.selectFirst("title")?.text()?.split("–")?.firstOrNull()?.trim()
+            ?: return null
+
+        Log.d(TAG, "Found title: $title")
+
+        var poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+        if (poster.isNullOrBlank()) {
+            poster = doc.selectFirst(".post-body img, .entry-content img, .post-thumbnail img, article img")?.let { img ->
+                img.attr("data-src").ifBlank {
+                    img.attr("src").ifBlank {
+                        img.attr("data-original")
+                    }
+                }
+            }
+        }
+        
+        Log.d(TAG, "Poster: $poster")
+
+        val plot = doc.selectFirst(".post-body, .entry-content, .post-content, article")?.text()?.trim()
+            ?: doc.selectFirst("meta[name='description']")?.attr("content")
+
+        val genres = doc.select(".labels a, .post-labels a, .tags a, a[rel='tag'], .label a").map { it.text().trim() }.filter { it.isNotBlank() }
+        
+        val statusText = doc.selectFirst(".status, .labels a:contains(Ongoing), .labels a:contains(Completed), .label:contains(Ongoing), .label:contains(Completed)")?.text() ?: ""
+        val status = when {
+            statusText.contains("Ongoing", true) || statusText.contains("Updating", true) || statusText.contains("Emisión", true) -> ShowStatus.Ongoing
+            statusText.contains("Completed", true) || statusText.contains("End", true) || statusText.contains("Finalizado", true) -> ShowStatus.Completed
+            else -> ShowStatus.Ongoing
+        }
+
+        val type = when {
+            url.contains("/pelicula/") || url.contains("/movie/") || title.contains("Movie", true) -> TvType.Movie
+            else -> TvType.Anime
+        }
 
         if (type == TvType.Movie) {
             return newMovieLoadResponse(title, url, type, url) {
@@ -144,36 +274,67 @@ class DonghuaZoneProvider : MainAPI() {
         }
 
         val episodes = mutableListOf<Episode>()
+        val processedUrls = mutableSetOf<String>()
         
-        // Find episodic links
-        doc.select(".post-body a[href*='episode-'], .entry-content a[href*='episode-']").forEach { epLink ->
-            val epUrl = epLink.attr("href")
-            val epText = epLink.text().trim()
-            if (epUrl.isNotBlank() && !episodes.any { it.data == epUrl }) {
-                val epNumMatches = Regex("""episode-(\d+)""").find(epUrl) ?: Regex("""[eE]pisode\s*(\d+)""").find(epText)
-                val epNum = epNumMatches?.groupValues?.get(1)?.toIntOrNull()
+        doc.select(".post-body a[href*='episode-'], .entry-content a[href*='episode-'], .post-content a[href*='episode-'], a[href*='episode-'][href*='donghuazone']").forEach { epLink ->
+            val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
+            val cleanUrl = if (epUrl.startsWith("//")) "https:$epUrl" else epUrl
+            
+            if (cleanUrl.isNotBlank() && cleanUrl.contains("donghuazone") && 
+                !processedUrls.contains(cleanUrl) && cleanUrl != url) {
+                processedUrls.add(cleanUrl)
                 
-                episodes.add(newEpisode(epUrl) {
-                    this.name = if (epNum != null) "Episode $epNum" else epText
-                    this.episode = epNum
+                val epText = epLink.text().trim()
+                
+                val epNumPatterns = listOf(
+                    Regex("""episode[- ]?(\d+)""", RegexOption.IGNORE_CASE),
+                    Regex("""episode\s*(\d+)[-\s](\d+)""", RegexOption.IGNORE_CASE),
+                    Regex("""[eE]p\.?\s*(\d+)"""),
+                    Regex("""(\d+)\s*$""")
+                )
+                
+                var epNum: Int? = null
+                var altEpNum: Int? = null
+                
+                for (pattern in epNumPatterns) {
+                    val match = pattern.find(epText) ?: pattern.find(cleanUrl)
+                    if (match != null) {
+                        val groups = match.groupValues
+                        epNum = groups.getOrNull(1)?.toIntOrNull()
+                        altEpNum = groups.getOrNull(2)?.toIntOrNull()
+                        if (epNum != null) break
+                    }
+                }
+                
+                val episodeName = if (epNum != null) {
+                    if (altEpNum != null) "Episode $epNum ($altEpNum)" else "Episode $epNum"
+                } else {
+                    epText.ifBlank { "Episode ${episodes.size + 1}" }
+                }
+
+                episodes.add(newEpisode(cleanUrl) {
+                    this.name = episodeName
+                    this.episode = epNum ?: (altEpNum ?: (episodes.size + 1))
                 })
             }
         }
 
-        // Si no hay links extraíbles, intentar cargar la pagina en sí como el episodio (común en Blogger si es post individual por cap)
         if (episodes.isEmpty()) {
+            Log.d(TAG, "No episode list found on page, creating single episode for direct playback")
             episodes.add(newEpisode(url) {
                 this.name = "Ver Ahora"
                 this.episode = 1
             })
         }
 
+        Log.d(TAG, "Found ${episodes.size} episodes")
+        
         return newAnimeLoadResponse(title, url, type) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = genres
             this.showStatus = status
-            addEpisodes(DubStatus.Subbed, episodes.reversed())
+            addEpisodes(DubStatus.Subbed, episodes.sortedBy { it.episode })
         }
     }
 
@@ -183,58 +344,87 @@ class DonghuaZoneProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = getDocument(data)
+        Log.d(TAG, "loadLinks called for: $data")
+        
+        val doc = getDocument(data) ?: run {
+            Log.e(TAG, "Failed to get document in loadLinks")
+            return false
+        }
+        
         var found = false
 
-        // Extract iframes commonly used for video streams
-        doc.select("iframe, div.player-option iframe").forEach { iframe ->
+        doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            if (src.isNotBlank() && !src.contains("youtube.com")) {
-                val safeUrl = if (src.startsWith("//")) "https:$src" else src
-                if (safeUrl.startsWith("http")) {
-                    loadExtractor(safeUrl, data, subtitleCallback, callback)
+            if (src.isNotBlank()) {
+                val fullUrl = if (src.startsWith("//")) "https:$src" else src
+                if (fullUrl.startsWith("http") && !fullUrl.contains("youtube.com") && !fullUrl.contains("googletagmanager")) {
+                    Log.d(TAG, "Found iframe: $fullUrl")
+                    loadExtractor(fullUrl, data, subtitleCallback, callback)
                     found = true
                 }
             }
         }
-        
-        // Look for typical GoogleDrive or common extractors links embedded via a href or data
-        doc.select("a.download-btn, a.play-btn, [data-video], ul#playeroptions li").forEach { link ->
-            val src = link.attr("data-video").ifBlank { link.attr("href") }.ifBlank { link.attr("data-src") }
-            if (src.isNotBlank() && src.startsWith("http") && !src.contains("youtube.com")) {
+
+        doc.select("video source, video").forEach { video ->
+            val src = video.attr("src").ifBlank { 
+                video.selectFirst("source")?.attr("src") 
+            }
+            if (!src.isNullOrBlank() && src.startsWith("http")) {
+                Log.d(TAG, "Found video source: $src")
                 loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
         }
 
-        // Subtitles from track elements
-        doc.select("video track, audio track").forEach { track ->
-            val src = track.attr("src")
-            val lang = track.attr("srclang").ifBlank { track.attr("label") }.ifBlank { "English" } // o es, id, pt
-            if (src.isNotBlank()) {
-                subtitleCallback(newSubtitleFile(lang, src))
-            }
-        }
-
-        // JSON config parse for player setup if embedded in scripts
-        doc.select("script").forEach { script ->
-            val content = script.html()
-            if (content.contains("subtitle:") || content.contains("captions:")) {
-                try {
-                    val subRegex = Regex("""\{[^}]*(?:url|file|src)\s*:\s*['"]([^'"]+)['"][^}]*(?:lang|label)\s*:\s*['"]([^'"]+)['"]""")
-                    subRegex.findAll(content).forEach { match ->
-                        val url = match.groupValues[1]
-                        val lang = match.groupValues[2]
-                        subtitleCallback(newSubtitleFile(lang, url))
-                    }
-                } catch (e: Exception) {
-                    // Ignore
+        doc.select(".player-embed, .video-embed, .embed-container iframe, .player-container iframe").forEach { embed ->
+            val src = embed.attr("src").ifBlank { embed.attr("data-src") }
+            if (!src.isNullOrBlank()) {
+                val fullUrl = if (src.startsWith("//")) "https:$src" else src
+                if (fullUrl.startsWith("http")) {
+                    Log.d(TAG, "Found embed: $fullUrl")
+                    loadExtractor(fullUrl, data, subtitleCallback, callback)
+                    found = true
                 }
             }
         }
 
+        doc.select("script").forEach { script ->
+            val content = script.html()
+            if (content.contains("iframe") || content.contains("player") || content.contains("embed")) {
+                val iframeRegex = Regex("""src\s*[:=]\s*['"]?([^'"&\s]+)['"]?""")
+                iframeRegex.findAll(content).forEach { match ->
+                    val src = match.groupValues[1]
+                    if (src.startsWith("http") && !src.contains("youtube.com")) {
+                        Log.d(TAG, "Found iframe in script: $src")
+                        loadExtractor(src, data, subtitleCallback, callback)
+                        found = true
+                    }
+                }
+                
+                val videoUrlRegex = Regex("""(?:video|media|source|file)\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+                videoUrlRegex.findAll(content).forEach { match ->
+                    val url = match.groupValues[1]
+                    if (url.startsWith("http")) {
+                        Log.d(TAG, "Found video URL in script: $url")
+                        loadExtractor(url, data, subtitleCallback, callback)
+                        found = true
+                    }
+                }
+            }
+        }
+
+        doc.select("a[href*='player'], a[href*='embed'], a[href*='video'], a[data-video], .download-btn, .play-btn").forEach { link ->
+            val href = link.attr("href").ifBlank { link.attr("data-video") }
+            if (!href.isNullOrBlank() && href.startsWith("http") && !href.contains("youtube.com")) {
+                Log.d(TAG, "Found link: $href")
+                loadExtractor(href, data, subtitleCallback, callback)
+                found = true
+            }
+        }
+
+        Log.d(TAG, "loadLinks finished, found: $found")
         return found
     }
 
-    private fun String.encodeUri() = java.net.URLEncoder.encode(this, "UTF-8")
+    private fun String.encodeUri(): String = java.net.URLEncoder.encode(this, "UTF-8")
 }
