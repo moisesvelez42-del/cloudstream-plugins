@@ -223,7 +223,7 @@ class DonghuaZoneProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         Log.d(TAG, "Loading URL: $url")
-        
+
         val doc = getDocument(url) ?: run {
             Log.e(TAG, "Failed to load document for URL: $url")
             return null
@@ -245,14 +245,14 @@ class DonghuaZoneProvider : MainAPI() {
                 }
             }
         }
-        
+
         Log.d(TAG, "Poster: $poster")
 
         val plot = doc.selectFirst(".post-body, .entry-content, .post-content, article")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
 
         val genres = doc.select(".labels a, .post-labels a, .tags a, a[rel='tag'], .label a").map { it.text().trim() }.filter { it.isNotBlank() }
-        
+
         val statusText = doc.selectFirst(".status, .labels a:contains(Ongoing), .labels a:contains(Completed), .label:contains(Ongoing), .label:contains(Completed)")?.text() ?: ""
         val status = when {
             statusText.contains("Ongoing", true) || statusText.contains("Updating", true) || statusText.contains("Emisión", true) -> ShowStatus.Ongoing
@@ -275,52 +275,29 @@ class DonghuaZoneProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
         val processedUrls = mutableSetOf<String>()
-        
-        doc.select(".post-body a[href*='episode-'], .entry-content a[href*='episode-'], .post-content a[href*='episode-'], a[href*='episode-'][href*='donghuazone']").forEach { epLink ->
-            val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
-            val cleanUrl = if (epUrl.startsWith("//")) "https:$epUrl" else epUrl
-            
-            if (cleanUrl.isNotBlank() && cleanUrl.contains("donghuazone") && 
-                !processedUrls.contains(cleanUrl) && cleanUrl != url) {
-                processedUrls.add(cleanUrl)
-                
-                val epText = epLink.text().trim()
-                
-                val epNumPatterns = listOf(
-                    Regex("""episode[- ]?(\d+)""", RegexOption.IGNORE_CASE),
-                    Regex("""episode\s*(\d+)[-\s](\d+)""", RegexOption.IGNORE_CASE),
-                    Regex("""[eE]p\.?\s*(\d+)"""),
-                    Regex("""(\d+)\s*$""")
-                )
-                
-                var epNum: Int? = null
-                var altEpNum: Int? = null
-                
-                for (pattern in epNumPatterns) {
-                    val match = pattern.find(epText) ?: pattern.find(cleanUrl)
-                    if (match != null) {
-                        val groups = match.groupValues
-                        epNum = groups.getOrNull(1)?.toIntOrNull()
-                        altEpNum = groups.getOrNull(2)?.toIntOrNull()
-                        if (epNum != null) break
-                    }
-                }
-                
-                val episodeName = if (epNum != null) {
-                    if (altEpNum != null) "Episode $epNum ($altEpNum)" else "Episode $epNum"
-                } else {
-                    epText.ifBlank { "Episode ${episodes.size + 1}" }
-                }
 
-                episodes.add(newEpisode(cleanUrl) {
-                    this.name = episodeName
-                    this.episode = epNum ?: (altEpNum ?: (episodes.size + 1))
-                })
-            }
+        Log.d(TAG, "Searching for episodes in page...")
+
+        extractEpisodesFromScripts(doc, processedUrls, episodes)
+
+        if (episodes.isEmpty()) {
+            extractEpisodesFromLinks(doc, url, processedUrls, episodes)
         }
 
         if (episodes.isEmpty()) {
-            Log.d(TAG, "No episode list found on page, creating single episode for direct playback")
+            extractEpisodesFromTable(doc, url, processedUrls, episodes)
+        }
+
+        if (episodes.isEmpty()) {
+            extractEpisodesFromNavigation(doc, url, processedUrls, episodes)
+        }
+
+        if (episodes.isEmpty()) {
+            extractEpisodesFromJsonData(doc, url, processedUrls, episodes)
+        }
+
+        if (episodes.isEmpty()) {
+            Log.d(TAG, "No episode list found, creating single episode for direct playback")
             episodes.add(newEpisode(url) {
                 this.name = "Ver Ahora"
                 this.episode = 1
@@ -328,14 +305,204 @@ class DonghuaZoneProvider : MainAPI() {
         }
 
         Log.d(TAG, "Found ${episodes.size} episodes")
-        
+        val sortedEpisodes = episodes.sortedBy { it.episode }
+
         return newAnimeLoadResponse(title, url, type) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = genres
             this.showStatus = status
-            addEpisodes(DubStatus.Subbed, episodes.sortedBy { it.episode })
+            addEpisodes(DubStatus.Subbed, sortedEpisodes)
         }
+    }
+
+    private fun extractEpisodesFromScripts(doc: org.jsoup.nodes.Document, processedUrls: MutableSet<String>, episodes: MutableList<Episode>) {
+        doc.select("script").forEach { script ->
+            val content = script.html()
+
+            if (content.contains("episode") || content.contains("Episode") || content.contains("eps")) {
+                val patterns = listOf(
+                    Regex("""["']id["']\s*:\s*["']([^"']+)["'][^}]*?["']title["']\s*:\s*["']([^"']*)["']"""),
+                    Regex("""episode[s]?\s*[:=]\s*\[([^\]]+)\]""", RegexOption.IGNORE_CASE),
+                    Regex("""\{[^}]*?(?:episode|ep)[^}]*?url\s*[:=]\s*["']([^"']+)["'][^}]*?""", RegexOption.IGNORE_CASE),
+                    Regex("""data\s*[:=]\s*\[([^\]]+)\]"""),
+                    Regex("""eps\s*[:=]\s*\[([^\]]+)\]""", RegexOption.IGNORE_CASE)
+                )
+
+                for (pattern in patterns) {
+                    pattern.findAll(content).forEach { match ->
+                        val groups = match.groupValues
+                        if (groups.size >= 2) {
+                            val potentialUrl = groups.getOrNull(1) ?: continue
+                            val potentialTitle = groups.getOrNull(2) ?: ""
+
+                            if (potentialUrl.contains("donghuazone") && potentialUrl.contains(".html") && !processedUrls.contains(potentialUrl)) {
+                                processedUrls.add(potentialUrl)
+                                val epNum = extractEpisodeNumber(potentialUrl, potentialTitle)
+                                episodes.add(newEpisode(potentialUrl) {
+                                    this.name = if (epNum != null) "Episode $epNum" else potentialTitle.ifBlank { "Episode ${episodes.size + 1}" }
+                                    this.episode = epNum ?: (episodes.size + 1)
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractEpisodesFromLinks(doc: org.jsoup.nodes.Document, pageUrl: String, processedUrls: MutableSet<String>, episodes: MutableList<Episode>) {
+        doc.select("a[href*='episode-'], a[href*='episode_']").forEach { epLink ->
+            val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
+            val cleanUrl = if (epUrl.startsWith("//")) "https:$epUrl" else epUrl
+
+            if (cleanUrl.isNotBlank() && cleanUrl.contains("donghuazone") &&
+                !processedUrls.contains(cleanUrl) && cleanUrl != pageUrl) {
+                processedUrls.add(cleanUrl)
+
+                val epText = epLink.text().trim()
+                val epNum = extractEpisodeNumber(cleanUrl, epText)
+
+                episodes.add(newEpisode(cleanUrl) {
+                    this.name = if (epNum != null) "Episode $epNum" else epText.ifBlank { "Episode ${episodes.size + 1}" }
+                    this.episode = epNum ?: (episodes.size + 1)
+                })
+            }
+        }
+
+        doc.select(".post-body a, .entry-content a, .post-content a").forEach { link ->
+            val href = link.attr("href")
+            if (href.contains("/20") && href.endsWith(".html") && href != pageUrl) {
+                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                if (!processedUrls.contains(fullUrl) && (href.contains("episode") || href.contains("Episode"))) {
+                    processedUrls.add(fullUrl)
+                    val text = link.text().trim()
+                    val epNum = extractEpisodeNumber(fullUrl, text)
+
+                    episodes.add(newEpisode(fullUrl) {
+                        this.name = if (epNum != null) "Episode $epNum" else text.ifBlank { "Episode ${episodes.size + 1}" }
+                        this.episode = epNum ?: (episodes.size + 1)
+                    })
+                }
+            }
+        }
+    }
+
+    private fun extractEpisodesFromTable(doc: org.jsoup.nodes.Document, pageUrl: String, processedUrls: MutableSet<String>, episodes: MutableList<Episode>) {
+        doc.select("table, .episode-list, .episodes, .episode-table, .ep-list").forEach { container ->
+            container.select("tr, li, .episode-item, .ep-item, .episode, td").forEach { item ->
+                val link = item.selectFirst("a[href]")
+                val href = link?.attr("href") ?: item.attr("data-href")
+
+                if (href.isNotBlank() && href.contains("donghuazone") && href.contains(".html")) {
+                    val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                    if (!processedUrls.contains(fullUrl) && fullUrl != pageUrl) {
+                        processedUrls.add(fullUrl)
+                        val text = link?.text()?.trim() ?: item.text().trim()
+                        val epNum = extractEpisodeNumber(fullUrl, text)
+
+                        episodes.add(newEpisode(fullUrl) {
+                            this.name = if (epNum != null) "Episode $epNum" else text.ifBlank { "Episode ${episodes.size + 1}" }
+                            this.episode = epNum ?: (episodes.size + 1)
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractEpisodesFromNavigation(doc: org.jsoup.nodes.Document, pageUrl: String, processedUrls: MutableSet<String>, episodes: MutableList<Episode>) {
+        doc.select("nav a, .nav a, .menu a, .pagination a, .pager a").forEach { link ->
+            val href = link.attr("href")
+            if (href.contains("donghuazone") && href.contains(".html") && href != pageUrl &&
+                (href.contains("episode") || href.contains("Episode"))) {
+                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                if (!processedUrls.contains(fullUrl)) {
+                    processedUrls.add(fullUrl)
+                    val text = link.text().trim()
+                    val epNum = extractEpisodeNumber(fullUrl, text)
+
+                    episodes.add(newEpisode(fullUrl) {
+                        this.name = if (epNum != null) "Episode $epNum" else text.ifBlank { "Episode ${episodes.size + 1}" }
+                        this.episode = epNum ?: (episodes.size + 1)
+                    })
+                }
+            }
+        }
+
+        doc.select("select option, .dropdown-menu a, .dropdown-item").forEach { item ->
+            val href = item.attr("value")?.takeIf { it.contains(".html") }
+                ?: item.attr("data-href")?.takeIf { it.contains(".html") }
+                ?: item.attr("href")?.takeIf { it.contains(".html") && it.contains("donghuazone") }
+
+            if (!href.isNullOrBlank()) {
+                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                if (!processedUrls.contains(fullUrl) && fullUrl != pageUrl) {
+                    processedUrls.add(fullUrl)
+                    val text = item.text().trim()
+                    val epNum = extractEpisodeNumber(fullUrl, text)
+
+                    episodes.add(newEpisode(fullUrl) {
+                        this.name = if (epNum != null) "Episode $epNum" else text.ifBlank { "Episode ${episodes.size + 1}" }
+                        this.episode = epNum ?: (episodes.size + 1)
+                    })
+                }
+            }
+        }
+    }
+
+    private fun extractEpisodesFromJsonData(doc: org.jsoup.nodes.Document, pageUrl: String, processedUrls: MutableSet<String>, episodes: MutableList<Episode>) {
+        val jsonPatterns = listOf(
+            Regex("""\{[^{}]*(?:episode|url|slug)[^{}]*\}"""),
+            Regex("""\[[\d,\s]+\]"""),
+            Regex(""""episodes"\s*:\s*\[([^\]]+)\]"""),
+            Regex(""""links"\s*:\s*\[([^\]]+)\]""")
+        )
+
+        doc.select("script").forEach { script ->
+            val content = script.html()
+            if (content.contains("episode") || content.contains("data") || content.contains("json")) {
+                jsonPatterns.forEach { pattern ->
+                    pattern.findAll(content).forEach { match ->
+                        val jsonStr = match.value
+                        val urlMatches = Regex("""https?://[^\s"']+\.html""").findAll(jsonStr)
+                        urlMatches.forEach { urlMatch ->
+                            val epUrl = urlMatch.value
+                            if (epUrl.contains("donghuazone") && !processedUrls.contains(epUrl) && epUrl != pageUrl) {
+                                processedUrls.add(epUrl)
+                                val epNum = extractEpisodeNumber(epUrl, "")
+                                episodes.add(newEpisode(epUrl) {
+                                    this.name = if (epNum != null) "Episode $epNum" else "Episode ${episodes.size + 1}"
+                                    this.episode = epNum ?: (episodes.size + 1)
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractEpisodeNumber(url: String, text: String): Int? {
+        val patterns = listOf(
+            Regex("""episode[- ]?(\d+)""", RegexOption.IGNORE_CASE),
+            Regex("""episode\s*(\d+)[-\s](\d+)""", RegexOption.IGNORE_CASE),
+            Regex("""[eE]p\.?\s*(\d+)"""),
+            Regex("""/(\d{2,4})(?:/|\.html|$)"""),
+            Regex("""-(\d{2,4})\.html""")
+        )
+
+        for (pattern in patterns) {
+            val match = pattern.find(text) ?: pattern.find(url)
+            if (match != null) {
+                val groups = match.groupValues
+                val num = groups.getOrNull(1)?.toIntOrNull()
+                if (num != null && num > 0 && num < 10000) {
+                    return num
+                }
+            }
+        }
+        return null
     }
 
     override suspend fun loadLinks(
