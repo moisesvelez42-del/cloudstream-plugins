@@ -1,11 +1,11 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "DonghuaLife Extension"
     authors = listOf("community")
     status = 1
     tvTypes = listOf("Anime", "AnimeMovie", "Movie")
-    iconUrl = "https://donghualife.com/sites/default/files/cropped-Publicacion-grafica-cuadrada-800x800-px-2-modified-1.png"
+    iconUrl = "https://donghualife.com/logo.webp"
 }
 
 android {

@@ -5,26 +5,27 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 /**
- * CloudStream3 extension for https://seriesdonghua.com  (v4)
+ * CloudStream3 extension for https://seriesdonghua.com  (v5)
  *
  * ── Video loading strategy ───────────────────────────────────────────────────
- * Episode pages embed ALL video-server URLs inside an obfuscated eval() block:
+ * Actualmente (verificado 2026-10 sobre el HTML real) la página del episodio ya
+ * NO contiene el bloque ofuscado `eval(function(h,u,n,t,e,r){...})` con
+ * `VIDEO_MAP_JSON`. En su lugar el reproductor carga los servidores vía AJAX:
  *
- *   eval(function(h,u,n,t,e,r){ … }("ENCODED_STR", BASE, "CHARSET", OFFSET, SEP_IDX, r))
+ *   POST https://seriesdonghua.com/api/player/get-server
+ *   headers: X-CSRF-TOKEN: <meta[name=csrf-token]>, X-Requested-With: XMLHttpRequest
+ *   body:    { "video_id": <int>, "server_index": <int> }
  *
- * The parameters change with each deployment, so we extract them dynamically.
+ * La respuesta es JSON:
+ *   {"success":true,"embed_url":"https:\/\/geo.dailymotion.com\/player\/..."}
  *
- * The decoded output is a <script> block containing:
- *   const VIDEO_MAP_JSON={
- *     "skadi":"\"https:\\/\\/ok.ru\\/videoembed\\/...\""
- *     "fembed":"\"https:\\/\\/rumble.com\\/embed\\/...\""
- *     "tape":"\"https:\\/\\/odysee.com\\/$\\/embed\\/...\""
- *     "amagi":"\"https:\\/\\/voe.sx\\/e\\/...\""
- *     "asura":"\"DAILYMOTION_VIDEO_ID\""   ← ID only, needs prefix
- *   }
+ * Cada botón `.server-tab-btn` del HTML expone `data-video-id` y
+ * `data-server-index` (0=Dailymotion, 1=OK.ru, 2=Rumble, 3=VOE en el episodio
+ * comprobado). Enviamos una petición por cada servidor y pasamos el `embed_url`
+ * a `loadExtractor` (que ya soporta dailymotion, ok.ru, rumble, voe.sx, etc.).
  *
- * Dailymotion is embedded as:
- *   https://www.dailymotion.com/embed/video/<id>
+ * El antiguo decodificador del bloque eval() se conserva como fallback por si
+ * algún episodio antiguo todavía lo usa.
  */
 class SeriesDonghuaProvider : MainAPI() {
 
@@ -54,14 +55,8 @@ class SeriesDonghuaProvider : MainAPI() {
         }
 
         /**
-         * Decode the site's eval() block.
-         * Params are extracted dynamically from the page (they are NOT hardcoded).
-         *
-         * @param encoded  The obfuscated string (h)
-         * @param base     Lookup base used inside `fromCustomBase` – unused for char-replacement step
-         * @param charset  The n-parameter charset used to replace chars → digit indexes
-         * @param offset   t – subtracted from the numeric value to get the char code
-         * @param sepIndex e – index into charset giving the separator character
+         * Decodifica el antiguo bloque eval() del sitio (legacy).
+         * Los parámetros se extraen dinámicamente de la página, no están fijos.
          */
         fun decodeEvalBlock(
             encoded: String,
@@ -89,9 +84,8 @@ class SeriesDonghuaProvider : MainAPI() {
         }
 
         /**
-         * Extract all embed/video URLs from the decoded JS.
-         * The decoded JS contains: document.write('<script>const VIDEO_MAP_JSON={...}')
-         * Due to JS escaping inside strings, the URLs have many levels of backslashes.
+         * Extrae todas las URLs de embed/video del JS decodificado.
+         * El JS contiene: document.write('<script>const VIDEO_MAP_JSON={...}')
          */
         fun extractEmbedsFromJs(js: String): List<String> {
             val results = mutableListOf<String>()
@@ -102,22 +96,20 @@ class SeriesDonghuaProvider : MainAPI() {
                 if (clean.startsWith("http") && seen.add(clean)) results.add(clean)
             }
 
-            // Unescape the string progressively to remove all backslash escaping
+            // Quita progresivamente todos los niveles de escapado con backslash
             var unescaped = js
             for (i in 0..5) {
                 unescaped = unescaped.replace(Regex("""\\(.)"""), "$1")
             }
 
-            // Now the string contains clean URLs like: "https://ok.ru/videoembed/..."
             val urlRegex = Regex("""https?://[^\s"'<>&`]+""")
             urlRegex.findAll(unescaped).forEach { m ->
-                // Skip the site's own wrapper player.php?url=...
                 if (!m.value.contains("player.php")) {
                     add(m.value)
                 }
             }
 
-            // Extract the Dailymotion ID. In the unescaped string it looks like: "asura":""VIDEO_ID""
+            // Dailymotion se incrusta como "asura":""VIDEO_ID""
             val dmRegex = Regex(""""asura"\s*:\s*""?([a-zA-Z0-9_-]{5,25})""?""")
             dmRegex.find(unescaped)?.groupValues?.getOrNull(1)?.let { dmId ->
                 if (!dmId.startsWith("http")) add("https://www.dailymotion.com/embed/video/$dmId")
@@ -128,108 +120,113 @@ class SeriesDonghuaProvider : MainAPI() {
     }
 
     // ── Main page ─────────────────────────────────────────────────────────────
+    // Todas las secciones paginan con el parámetro de query ?page=N
+    // (verificado: /todos-los-donghuas/page/2/ da 404, /todos-los-donghuas?page=2 da 200).
 
     override val mainPage = mainPageOf(
-        "$mainUrl/"                      to "Nuevos Episodios",
+        "$mainUrl/episodios"             to "Nuevos Episodios",
         "$mainUrl/todos-los-donghuas"    to "Todos los Donghuas",
         "$mainUrl/donghuas-en-emision"   to "En Emisión",
         "$mainUrl/donghuas-finalizados"  to "Finalizados",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val baseUrl = request.data
-        // Pagination only works reliably on the "new episodes" feed
-        val url = if (page > 1 && baseUrl == "$mainUrl/")
-            "$mainUrl/episodios/page/$page/"
-        else if (page > 1)
-            return newHomePageResponse(request.name, emptyList())
-        else
-            baseUrl
-
-        val doc   = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
-        val items = doc.select("div.item").mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty() && baseUrl == "$mainUrl/")
+        val url = if (page > 1) "${request.data}?page=$page" else request.data
+        val doc = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
+        val items = doc.select("article.donghua-card").mapNotNull { it.toSearchResult() }
+        return newHomePageResponse(request.name, items, hasNext = items.size >= 20)
     }
 
     // ── Card parser ───────────────────────────────────────────────────────────
-    // div.item > a.angled-img[href] > div.img > img[src]
-    //                               > div.bottom-info > h5
+    // article.donghua-card > a[href] > div.card-poster-wrap > img[src]
+    //                               > div.card-body > h3.card-title
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor  = selectFirst("a.angled-img, a") ?: return null
+        val anchor  = selectFirst("a[href]") ?: return null
         val urlAttr = anchor.attr("href").trim().ifBlank { return null }
         val url     = fixUrl(urlAttr)
 
-        val title = selectFirst("h5.sf, h5, .bg-titulo, .bottom-info h5")
-            ?.text()?.trim() ?: return null
+        val title = selectFirst(".card-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: anchor.attr("title").trim().ifBlank { null }
+            ?: return null
 
         val imgEl  = selectFirst("img")
         val rawImg = imgEl?.attr("src")?.ifBlank { imgEl.attr("data-src") }
-        val poster = rawImg?.let { fixUrl(it) }
+        val poster = rawImg?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
 
         return newAnimeSearchResponse(title, url, TvType.Anime) { posterUrl = poster }
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
-    // Endpoint: /busquedas/<query> – returns series cards (div.item with series URLs)
-    // NOTE: Previously the code was filtering OUT series URLs by mistake.
+    // Endpoint actual: /buscar.php?s=<query> (el antiguo /busquedas/<query> da 404).
+    // Devuelve las mismas tarjetas article.donghua-card que la portada.
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = java.net.URLEncoder.encode(query.trim(), "utf-8").replace("+", "%20")
         val doc = app.get(
-            "$mainUrl/busquedas/$encoded",
+            "$mainUrl/buscar.php?s=$encoded",
             headers = mapOf("User-Agent" to USER_AGENT)
         ).document
 
-        return doc.select("div.item").mapNotNull { it.toSearchResult() }
+        return doc.select("article.donghua-card").mapNotNull { it.toSearchResult() }
     }
 
     // ── Load ──────────────────────────────────────────────────────────────────
 
     override suspend fun load(url: String): LoadResponse? {
         val h   = mapOf("User-Agent" to USER_AGENT)
-        val res = app.get(url, headers = h)
-        val doc = res.document
+        val doc = app.get(url, headers = h).document
 
-        // ── Episode page detection ─────────────────────────────────────────────
-        if (doc.selectFirst("input#donghua_key") != null ||
-            doc.selectFirst("#tamamo_player, .player-container") != null) {
+        // ── Página de episodio ────────────────────────────────────────────────
+        // Marcadores actuales: .server-tab-btn (pestañas de servidor) / #player-container.
+        if (doc.selectFirst(".server-tab-btn, #player-container, .player-card-wrapper") != null) {
 
-            // Try to navigate to the parent series page via "list" link
-            val seriesUrl = doc.selectFirst("a:has(i.fa-list)")?.absUrl("href")
-                ?: doc.selectFirst(".media-bar-player a[href]:not([href*='episodio'])")?.absUrl("href")
+            // Intenta navegar a la página de la serie ("Lista de Episodios")
+            val seriesUrl = doc.selectFirst(
+                "a[aria-label='Lista de Episodios'], a:has(i.fa-th-list), " +
+                "a[title*='todos los episodios'], a[title*='lista de episodios']"
+            )?.attr("href")?.trim()?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
 
             if (!seriesUrl.isNullOrBlank() && seriesUrl != url) {
                 return load(seriesUrl)
             }
 
-            val title  = doc.selectFirst("h3.sf, .title-serie, h3, h1")?.text()?.trim() ?: "Episodio"
+            val title  = doc.selectFirst("h1.player-title")?.text()?.trim()
+                ?: doc.selectFirst("h1")?.text()?.trim()
+                ?: "Episodio"
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             return newMovieLoadResponse(title, url, TvType.Movie, url) { posterUrl = poster }
         }
 
-        // ── Series page ───────────────────────────────────────────────────────
+        // ── Página de serie ───────────────────────────────────────────────────
 
-        val title = doc.selectFirst(".ls-title-serie")?.text()?.trim()
+        val title = doc.selectFirst("h1.hero-title")?.text()?.trim()
             ?: doc.selectFirst("h1")?.text()?.trim()
             ?: return null
 
-        // Poster from CSS background or og:image
-        val poster = doc.selectFirst(".banner-side-serie")?.attr("style")
-            ?.substringAfter("url(", "")?.substringBefore(")", "")
-            ?.trim()?.let { fixUrl(it) }
+        // Poster: <img class="hero-poster" src=...>, o el fondo .hero-banner-bg, o og:image
+        val poster = doc.selectFirst("img.hero-poster")?.attr("src")?.trim()?.takeIf { it.isNotBlank() }
+            ?.let { fixUrl(it) }
+            ?: doc.selectFirst(".hero-banner-bg")?.attr("style")
+                ?.substringAfter("url(", "")?.substringBefore(")")
+                ?.trim('\'', '"', ' ')?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
 
-        val synopsis = doc.select(".text-justify p")
+        val synopsis = doc.select(".glass-panel:has(h2:contains(Sinopsis)) p")
             .joinToString("\n") { it.text().trim() }.ifBlank { null }
-        val genres = doc.select("a.generos span, a.generos").map { it.text().trim() }
+        val genres = doc.select("a.genre-pill").map { it.text().trim() }.filter { it.isNotBlank() }
 
-        val episodes = doc.select("ul.donghua-list a").mapNotNull { anchor ->
-            val epUrl  = anchor.absUrl("href").ifBlank { return@mapNotNull null }
-            val epText = anchor.selectFirst("blockquote")?.text()?.trim()
-                ?: anchor.text().trim()
-            val epNum  = Regex("""(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
+        // Cada episodio: article.episode-card-item[data-ep] > a[href] > .card-title
+        val episodes = doc.select("article.episode-card-item").mapNotNull { card ->
+            val anchor = card.selectFirst("a[href]") ?: return@mapNotNull null
+            val epUrl  = fixUrl(anchor.attr("href").trim())
+            if (epUrl.isBlank()) return@mapNotNull null
+
+            val epNum = card.attr("data-ep").toIntOrNull()
                 ?: Regex("""-episodio-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
+            val epText = card.selectFirst(".card-title")?.text()?.trim()
+                ?: anchor.attr("title").trim().ifBlank { "Episodio ${epNum ?: ""}" }
+
             newEpisode(epUrl) {
                 name    = epText
                 episode = epNum
@@ -263,8 +260,53 @@ class SeriesDonghuaProvider : MainAPI() {
         val doc      = response.document
         var found    = false
 
-        // ── Strategy 1: Decode eval() block (dynamic params) ──────────────────
-        // Pattern: eval(function(h,u,n,t,e,r){r="";…}("ENCODED",BASE,"CHARSET",OFFSET,SEP,r))
+        // ── Strategy 1: API AJAX /api/player/get-server (esquema actual) ──────
+        // Laravel exige que el POST viaje con la MISMA sesión del GET (cookie
+        // XSRF-TOKEN) y con el token CSRF del meta de esa misma respuesta; si no,
+        // responde "CSRF token mismatch". NiceHttp no persiste cookies solo, así
+        // que se reenvían las de `response.cookies`.
+        val csrf = doc.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
+        val serverTabs = doc.select(".server-tab-btn[data-video-id]")
+        if (!csrf.isNullOrBlank() && serverTabs.isNotEmpty()) {
+            for (tab in serverTabs) {
+                val videoId     = tab.attr("data-video-id").trim()
+                val serverIndex = tab.attr("data-server-index").trim()
+                if (videoId.isEmpty() || serverIndex.isEmpty()) continue
+
+                val body = try {
+                    app.post(
+                        "$mainUrl/api/player/get-server",
+                        data = mapOf(
+                            "video_id"     to videoId,
+                            "server_index" to serverIndex,
+                        ),
+                        cookies = response.cookies,
+                        headers = mapOf(
+                            "User-Agent"       to USER_AGENT,
+                            "Referer"          to data,
+                            "X-CSRF-TOKEN"     to csrf,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Accept"           to "application/json, text/plain, */*",
+                        ),
+                    ).text
+                } catch (_: Exception) {
+                    ""
+                }
+
+                val embed = Regex(""""embed_url"\s*:\s*"([^"]+)"""")
+                    .find(body)?.groupValues?.getOrNull(1)
+                    ?.replace("\\/", "/")
+                    ?.trim()
+
+                if (!embed.isNullOrBlank() && embed.startsWith("http")) {
+                    loadExtractor(embed, data, subtitleCallback, callback)
+                    found = true
+                }
+            }
+        }
+        if (found) return true
+
+        // ── Strategy 2 (fallback legacy): decodificar el bloque eval() ────────
         val evalRegex = Regex(
             """eval\(function\(h,u,n,t,e,r\)\{r="".*?\}\("([^"]+)",(\d+),"([^"]+)",(\d+),(\d+),\d+\)\)""",
             RegexOption.DOT_MATCHES_ALL
@@ -287,7 +329,7 @@ class SeriesDonghuaProvider : MainAPI() {
             }
         }
 
-        // ── Strategy 2: Raw URL patterns directly in the HTML source ──────────
+        // ── Strategy 3 (fallback): patrones de URL directos en el HTML ────────
         val rawPatterns = listOf(
             Regex("""https?://(?:geo\.)?dailymotion\.com/(?:player|embed)/[^\s"'<>&\\]+"""),
             Regex("""https?://www\.dailymotion\.com/embed/video/[A-Za-z0-9_-]+"""),
@@ -302,14 +344,14 @@ class SeriesDonghuaProvider : MainAPI() {
         for (pattern in rawPatterns) {
             pattern.findAll(html).forEach { m ->
                 val rawUrl = m.value.replace("\\/", "/")
-                if (!rawUrl.contains("player.php")) {  // skip the wrapper
+                if (!rawUrl.contains("player.php")) {  // salta el wrapper propio del sitio
                     loadExtractor(rawUrl, data, subtitleCallback, callback)
                     found = true
                 }
             }
         }
 
-        // ── Strategy 3: Direct iframes in DOM ─────────────────────────────────
+        // ── Strategy 4 (fallback): iframes directos en el DOM ─────────────────
         if (!found) {
             doc.select("iframe[src], iframe[data-src]").forEach { iframe ->
                 val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
@@ -320,7 +362,7 @@ class SeriesDonghuaProvider : MainAPI() {
             }
         }
 
-        // ── Strategy 4: data-* attributes on player containers ────────────────
+        // ── Strategy 5 (fallback): atributos data-* en contenedores ───────────
         if (!found) {
             doc.select("[data-video],[data-player],[data-src],[data-embed],[data-stream]")
                 .forEach { el ->

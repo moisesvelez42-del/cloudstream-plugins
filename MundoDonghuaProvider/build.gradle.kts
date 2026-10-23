@@ -16,7 +16,7 @@ cloudstream {
     // Anime / Donghua content
     tvTypes = listOf("Anime", "TvSeries", "Movie")
 
-    iconUrl = "https://raw.githubusercontent.com/moisesvelez42-del/cloudstream-plugins/builds/MundoDonghuaProvider.png"
+    iconUrl = "https://www.mundodonghua.com/images/favicon.png"
 }
 
 android {

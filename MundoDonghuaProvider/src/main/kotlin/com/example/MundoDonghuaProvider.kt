@@ -3,8 +3,8 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 
 class MundoDonghuaProvider : MainAPI() {
 
@@ -20,225 +20,202 @@ class MundoDonghuaProvider : MainAPI() {
     )
 
     companion object {
-        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+        // Alfabeto del empaquetador Dean Edwards (0-9, a-z, A-Z) para notación en base N.
+        private const val PACKER_ALPHA = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     }
 
     private val cloudflareKiller = CloudflareKiller()
 
-    private suspend fun getDocument(url: String): org.jsoup.nodes.Document {
+    // ── Petición central: TODAS las llamadas (portada, búsqueda, detalle, loadLinks)
+    // pasan por aquí con cabeceras de navegador + interceptor anti-Cloudflare. ──
+    private suspend fun getDocument(url: String): Document {
         val requestHeaders = mapOf(
             "User-Agent" to USER_AGENT,
-            "Referer" to "https://www.mundodonghua.com/",
+            "Referer" to "$mainUrl/",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language" to "es-ES,es;q=0.9"
         )
 
         var response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
-
-        // Retry on 403/503 or Cloudflare challenge HTML
-        if (response.code == 403 || response.code == 503 ||
-            response.document.title().contains("Just a moment", ignoreCase = true) ||
-            response.document.title().contains("Cloudflare", ignoreCase = true)) {
-            Thread.sleep(2500) // 2.5 seconds delay
+        var attempt = 0
+        // Reintenta con espera creciente si Cloudflare devuelve 403/503 o el reto "Just a moment".
+        while (attempt < 3 && (
+                    response.code == 403 || response.code == 503 ||
+                            response.document.title().contains("Just a moment", true) ||
+                            response.document.title().contains("Cloudflare", true)
+                    )
+        ) {
+            attempt++
+            Thread.sleep(1500L * attempt)
             response = app.get(url, headers = requestHeaders, interceptor = cloudflareKiller)
         }
 
         return response.document
     }
 
+    // ── Portada: secciones verificadas (todas responden 200) ──
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Últimos Episodios",
+        "$mainUrl/" to "Estrenos",
+        "$mainUrl/lista-episodios" to "Últimos Episodios",
+        "$mainUrl/lista-donghuas" to "Todas las Series",
+        "$mainUrl/lista-donghuas-emision" to "En Emisión",
+        "$mainUrl/lista-donghuas-finalizados" to "Finalizadas",
+        "$mainUrl/lista-donghuas-recopilados" to "Recopiladas",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = getDocument(request.data)
-
-        val homeItems = mutableListOf<SearchResponse>()
-
-        // Buscar todos los enlaces que contengan /donghua/ o /pelicula/
-        doc.select("a[href*=/donghua/], a[href*=/pelicula/]").forEach { element ->
-            val result = element.toSearchResultFromAnchor()
-            if (result != null && homeItems.none { it.url == result.url }) {
-                homeItems.add(result)
-            }
-        }
-
-        return newHomePageResponse(request.name, homeItems, hasNext = false)
-    }
-
-    private fun Element.toSearchResultFromAnchor(): SearchResponse? {
-        val href = attr("href")?.trim() ?: return null
-        if (href.isBlank()) return null
-
-        val url = when {
-            href.startsWith("http") -> href
-            href.startsWith("/") -> "$mainUrl$href"
-            else -> "$mainUrl/$href"
-        }
-
-        // Solo URLs de donghua o pelicula
-        if (!url.contains("/donghua/") && !url.contains("/pelicula/")) return null
-
-        // Extraer nombre del alt de la imagen o del texto
-        val name = selectFirst("img")?.attr("alt")?.trim()
-            ?: text()?.trim()?.lines()?.firstOrNull()?.trim()
-            ?: return null
-
-        // Limpiar nombre - quitar texto como "Episodio X" o fechas
-        val cleanName = name
-            .replace(Regex("""Episodio\s*\d+""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\d{2}-\d{2}-\d{4}"""), "")
-            .replace(Regex("""\d{1,3}(,\d{3})*"""), "")
-            .trim()
-
-        // Extraer poster
-        val poster = selectFirst("img")?.let { img ->
-            img.attr("data-src").ifBlank {
-                img.attr("src").ifBlank {
-                    img.attr("data-original")
-                }
-            }
-        }
-
-        val type = when {
-            url.contains("/pelicula/") -> TvType.Movie
-            else -> TvType.Anime
-        }
-
-        return if (type == TvType.Movie) {
-            newMovieSearchResponse(cleanName, url, type) {
-                this.posterUrl = poster
-            }
-        } else {
-            newAnimeSearchResponse(cleanName, url, type) {
-                this.posterUrl = poster
-            }
-        }
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/busquedas/${query.encodeUri()}"
+        // Los listados paginan como <seccion>/<pagina>. La portada ("/") no pagina.
+        val url = if (page > 1) "${request.data.trimEnd('/')}/$page" else request.data
         val doc = getDocument(url)
 
-        val results = mutableListOf<SearchResponse>()
+        val homeItems = parseCards(doc)
+        val hasNext = doc.selectFirst("nav.md-pagination a[href]") != null
 
-        doc.select("a[href*=/donghua/], a[href*=/pelicula/]").forEach { element ->
-            val result = element.toSearchResultFromAnchor()
-            if (result != null && results.none { it.url == result.url }) {
-                results.add(result)
-            }
-        }
-
-        return results
+        return newHomePageResponse(request.name, homeItems, hasNext = hasNext)
     }
 
+    // ── Parser de tarjetas, reutilizado por portada, listados y búsqueda ──
+    private fun parseCards(doc: Document): List<SearchResponse> {
+        val items = mutableListOf<SearchResponse>()
+
+        // Carrusel de la portada: <a class="md-carousel-item" href="/donghua/slug"> + h3 + img
+        doc.select("a.md-carousel-item").forEach { a ->
+            val title = a.selectFirst(".md-carousel-label h3")?.text()?.trim()
+                ?: a.selectFirst("img")?.attr("alt")?.trim()
+            toSearchResponse(a.attr("href"), title, posterOf(a))?.let { items.add(it) }
+        }
+
+        // Rejillas: <div class="md-card"><a href="/donghua/slug"|"/ver/slug/ep"> + .md-card-title + img
+        doc.select(".md-card a[href]").forEach { a ->
+            val title = a.selectFirst(".md-card-title")?.text()?.trim()
+                ?: a.selectFirst("img")?.attr("alt")?.trim()
+            toSearchResponse(a.attr("href"), title, posterOf(a))?.let { items.add(it) }
+        }
+
+        return items.distinctBy { it.url }
+    }
+
+    /** Poster de una tarjeta (data-src > src > data-original). */
+    private fun posterOf(container: Element): String? {
+        val img = container.selectFirst("img") ?: return null
+        val raw = img.attr("data-src").ifBlank {
+            img.attr("src").ifBlank { img.attr("data-original") }
+        }
+        return raw.takeIf { it.isNotBlank() && !it.startsWith("data:") }?.let { fixUrl(it) }
+    }
+
+    private fun toSearchResponse(href: String?, rawTitle: String?, poster: String?): SearchResponse? {
+        if (href.isNullOrBlank()) return null
+        val abs = fixUrl(href)
+
+        // Las tarjetas de episodio (/ver/<slug>/<num>) se normalizan a su serie (/donghua/<slug>).
+        val seriesUrl = when {
+            abs.contains("/donghua/") -> abs
+            abs.contains("/ver/") -> {
+                val slug = abs.substringAfter("/ver/").substringBefore("/")
+                if (slug.isBlank()) return null else "$mainUrl/donghua/$slug"
+            }
+            else -> return null
+        }
+
+        // Quita el sufijo "Episodio N"/"Capítulo N" de las tarjetas de episodio.
+        val name = rawTitle.orEmpty()
+            .replace(Regex("""\s*-?\s*(Episodio|Cap[íi]tulo)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .ifBlank { seriesUrl.substringAfterLast('/') }
+
+        val type = if (seriesUrl.contains("/pelicula/")) TvType.Movie else TvType.Anime
+        return if (type == TvType.Movie) {
+            newMovieSearchResponse(name, seriesUrl, type) { posterUrl = poster }
+        } else {
+            newAnimeSearchResponse(name, seriesUrl, type) { posterUrl = poster }
+        }
+    }
+
+    // ── Búsqueda: GET /busquedas/<query> (filtra de verdad; el query param devolvía todo el catálogo) ──
+    override suspend fun search(query: String): List<SearchResponse> {
+        val doc = getDocument("$mainUrl/busquedas/${query.encodeUri()}")
+        return parseCards(doc)
+    }
+
+    // ── Detalle de serie ──
     override suspend fun load(url: String): LoadResponse? {
         val doc = getDocument(url)
 
-        // Extraer título
-        val title = doc.selectFirst("h1, .title, .entry-title, .anime-title")?.text()?.trim()?.split("–")?.firstOrNull()?.trim()
+        val title = doc.selectFirst("h1.md-detail-title")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: return null
 
-        // Extraer poster desde múltiples fuentes
-        var poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-        if (poster.isNullOrBlank()) {
-            poster = doc.selectFirst(".anime-cover img, .poster img, .thumb img, .cover img")?.let { img ->
-                img.attr("data-src").ifBlank {
-                    img.attr("src").ifBlank {
-                        img.attr("data-original")
-                    }
+        var poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+            ?.takeIf { it.isNotBlank() }
+        if (poster == null) {
+            poster = doc.selectFirst(".md-detail-poster img")?.let { img ->
+                img.attr("data-src").ifBlank { img.attr("src") }
+            }?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+        }
+
+        val plot = doc.selectFirst(".md-detail-synopsis")?.text()?.trim()?.takeIf { it.isNotBlank() }
+
+        val genres = doc.select(".md-genres-block .md-genre-tags a")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+
+        val statusText = doc.selectFirst(".md-emision-badge")?.text()?.trim()?.lowercase().orEmpty()
+        val showStatus = when {
+            statusText.contains("emisi") -> ShowStatus.Ongoing   // "En emisión"
+            else -> ShowStatus.Completed                          // "Finalizada"
+        }
+
+        // Episodios: <li class="md-episode-item" data-ep="N"><a class="md-ep-link" href="/ver/<slug>/<N>">
+        val episodes = doc.select("ul.md-episode-list li.md-episode-item")
+            .mapIndexedNotNull { index, li ->
+                val a = li.selectFirst("a.md-ep-link") ?: return@mapIndexedNotNull null
+                val epUrl = fixUrl(a.attr("href"))
+                val epNum = li.attr("data-ep").toIntOrNull()
+                    ?: a.selectFirst("h5")?.text()
+                        ?.let { t -> Regex("""(\d+)\s*$""").find(t)?.groupValues?.get(1)?.toIntOrNull() }
+                    ?: (index + 1)
+                newEpisode(epUrl) {
+                    this.name = "Episodio $epNum"
+                    this.episode = epNum
                 }
             }
+            .toMutableList()
+
+        // Respaldo por si alguna ficha no lista episodios: permite reproducir desde la ficha.
+        if (episodes.isEmpty()) {
+            episodes.add(newEpisode(url) {
+                this.name = "Ver ahora"
+                this.episode = 1
+            })
         }
 
-        // Extraer sinopsis
-        val plot = doc.selectFirst(".sinopsis, .description, .plot, meta[name='description'], .summary, .synopsis")?.let {
-            if (it.tagName() == "meta") it.attr("content") else it.text().trim()
-        }?.takeIf { it.isNotBlank() }
-
-        // Extraer géneros
-        val genres = doc.select(".generos a, .genres a, .tags a, .genre, .sgeneros a, .categories a").map {
-            it.text().trim()
-        }.filter { it.isNotBlank() }
-
-        // Extraer año
-        val year = doc.selectFirst(".year, .info-item:contains(Año), [class*='year'], .date, .release-year")?.text()
-            ?.filter { it.isDigit() }?.take(4)?.toIntOrNull()
-
-        // Extraer estado
-        val statusText = doc.selectFirst(".status, .info-item:contains(Estado), [class*='status'], .airing, .anime-status")?.text()?.lowercase() ?: ""
-        val showStatus = when {
-            statusText.contains("emisión") || statusText.contains("ongoing") || statusText.contains("airing") -> ShowStatus.Ongoing
-            statusText.contains("finalizado") || statusText.contains("completed") || statusText.contains("finished") -> ShowStatus.Completed
-            else -> ShowStatus.Completed
-        }
-
-        val type = when {
-            url.contains("/pelicula/") -> TvType.Movie
-            else -> TvType.Anime
-        }
+        val type = if (url.contains("/pelicula/")) TvType.Movie else TvType.Anime
 
         if (type == TvType.Movie) {
             return newMovieLoadResponse(title, url, type, url) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = genres
-                this.year = year
             }
-        }
-
-        val episodes = mutableListOf<Episode>()
-
-        // Buscar en la página de detalle enlaces a episodios
-        doc.select("a[href*='/ver/']").forEach { epLink ->
-            val epUrl = epLink.absUrl("href").ifBlank { epLink.attr("href") }
-            if (epUrl.isBlank() || !epUrl.contains(mainUrl)) return@forEach
-
-            // Evitar duplicados
-            if (episodes.any { it.data == epUrl }) return@forEach
-
-            val epText = epLink.text().trim()
-
-            // Extraer número de episodio de varias formas posibles
-            val epNum = Regex("""Episodio\s*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""(\d+)\s*$""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""episodio[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""\d+\s*x\s*(\d+)""").find(epText)?.groupValues?.get(1)?.toIntOrNull()
-
-            // Intentar extraer temporada de la URL
-            val season = Regex("""-(\d+)/ver/|temporada[:\s]*(\d+)""", RegexOption.IGNORE_CASE).find(epUrl)?.let {
-                it.groupValues.get(1).toIntOrNull() ?: it.groupValues.get(2).toIntOrNull()
-            } ?: 1
-
-            val name = if (epNum != null) "Episodio $epNum" else epText.ifBlank { "Episodio" }
-
-            episodes.add(newEpisode(epUrl) {
-                this.name = name
-                this.season = season
-                this.episode = epNum ?: 1
-            })
-        }
-
-        // Si no encontramos episodios, crear uno genérico apuntando a la URL actual
-        // Esto permite reproducir desde la página de detalle
-        if (episodes.isEmpty()) {
-            episodes.add(newEpisode(url) {
-                this.name = "Ver ahora"
-                this.season = 1
-                this.episode = 1
-            })
         }
 
         return newAnimeLoadResponse(title, url, type) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = genres
-            this.year = year
             this.showStatus = showStatus
             addEpisodes(DubStatus.Subbed, episodes.reversed())
         }
     }
 
+    // ── Reproductores ──
+    // La página de episodio (/ver/...) NO trae iframes en el HTML: los servidores se
+    // construyen con JS ofuscado (empaquetador Dean Edwards) que contiene, en texto,
+    // las URLs reales: Filemoon (bysekoze.com), Voe (voe.sx), VidHide (vidhidepro.com),
+    // StreamWish (embedwish.com) y Asura (mdplayer.xyz, HLS). Se extraen del JS.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -248,55 +225,72 @@ class MundoDonghuaProvider : MainAPI() {
         val doc = getDocument(data)
         var found = false
 
-        // Múltiples selectores para servidores
-        val serverSelectors = listOf(
-            ".servidores li",
-            ".options li", 
-            ".players li",
-            ".server-list li",
-            ".episode-servers li",
-            ".server-item",
-            ".video-option",
-            "[data-server]"
-        )
-        
-        for (selector in serverSelectors) {
-            doc.select(selector).forEach { server ->
-                // Intentar obtener URL de múltiples atributos
-                val dataUrl = server.attr("data-url").ifBlank { 
-                    server.attr("data-src").ifBlank {
-                        server.attr("data-link").ifBlank {
-                            server.selectFirst("a")?.attr("href")
-                        }
-                    }
-                }
-                
-                if (!dataUrl.isNullOrBlank() && (dataUrl.startsWith("http") || dataUrl.startsWith("//"))) {
-                    val fullUrl = if (dataUrl.startsWith("//")) "https:$dataUrl" else dataUrl
-                    loadExtractor(fullUrl, data, subtitleCallback, callback)
-                    found = true
-                }
-            }
-        }
-
+        // 1) Enlaces estáticos (iframes / video source), por si el sitio vuelve a usarlos.
         doc.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            if (src.isNotBlank()) {
-                val fullUrl = if (src.startsWith("//")) "https:$src" else src
-                loadExtractor(fullUrl, data, subtitleCallback, callback)
+            val src = iframe.attr("data-src").ifBlank { iframe.attr("src") }
+            if (src.startsWith("http")) {
+                loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
         }
 
         doc.select("video source").forEach { source ->
             val src = source.attr("src")
-            if (src.isNotBlank()) {
+            if (src.startsWith("http")) {
                 loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
         }
 
+        // 2) URLs embebidas en el JS ofuscado de los reproductores (comillas simples a veces escapadas: \').
+        val decoded = decodePackerScripts(doc.outerHtml())
+        Regex("""(?:src|file)\s*[:=]\s*\\?['"]?\s*(https?://[^'"\\\s]+)""").findAll(decoded).forEach { m ->
+            loadExtractor(m.groupValues[1], data, subtitleCallback, callback)
+            found = true
+        }
+
         return found
+    }
+
+    /** Decodifica todos los bloques `eval(function(p,a,c,k,e,d){...}('...',a,c,'dict'.split('|'),0,{}))`. */
+    private fun decodePackerScripts(html: String): String {
+        val result = StringBuilder()
+        val regex = Regex(
+            """function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        regex.findAll(html).forEach { m ->
+            val payload = m.groupValues[1]
+            val radix = m.groupValues[2].toIntOrNull() ?: return@forEach
+            val count = m.groupValues[3].toIntOrNull() ?: return@forEach
+            val dict = m.groupValues[4].split("|")
+            result.append(unpack(payload, radix, count, dict)).append('\n')
+        }
+        return result.toString()
+    }
+
+    /** Implementación del desempaquetado Dean Edwards: sustituye cada token base-N por su palabra. */
+    private fun unpack(payload: String, radix: Int, count: Int, dict: List<String>): String {
+        var out = payload
+        for (i in count - 1 downTo 0) {
+            val value = dict.getOrNull(i)
+            if (value.isNullOrEmpty()) continue
+            val token = baseN(i, radix)
+            if (token.isEmpty()) continue
+            out = Regex("\\b" + Regex.escape(token) + "\\b").replace(out) { value }
+        }
+        return out
+    }
+
+    private fun baseN(num: Int, radix: Int): String {
+        if (num == 0) return "0"
+        var n = num
+        val sb = StringBuilder()
+        while (n > 0) {
+            sb.insert(0, PACKER_ALPHA[n % radix])
+            n /= radix
+        }
+        return sb.toString()
     }
 
     private fun String.encodeUri(): String =

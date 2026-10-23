@@ -6,7 +6,9 @@ import org.jsoup.nodes.Element
 
 class TioDonghuaProvider : MainAPI() {
 
-    override var mainUrl  = "https://tiodonghua.com"
+    // El dominio antiguo (tiodonghua.com) responde 301 → tiodonghua.lat, que es
+    // el host canónico que usa la propia web en todos sus enlaces internos.
+    override var mainUrl  = "https://tiodonghua.lat"
     override var name     = "TioDonghua"
     override var lang     = "es"
     override val hasMainPage = true
@@ -76,19 +78,26 @@ class TioDonghuaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val doc = app.get(url).document
 
+        // Título: la ficha de serie (DooPlay) usa .sheader .data h1.
+        // Las páginas de episodio (a donde apuntan las tarjetas del home) no
+        // tienen .sheader, pero sí <h1 class="epih1">.
         val title   = doc.selectFirst(".sheader .data h1")?.text()?.trim()
-            ?: doc.selectFirst("h1.entry-title")?.text()?.trim()
+            ?: doc.selectFirst("h1.epih1")?.text()?.trim()
             ?: return null
 
+        // Póster: en la ficha es .poster img (con src, no data-src).
+        // En el episodio no hay .poster, por lo que se usa og:image como respaldo.
         val poster  = doc.selectFirst(".poster img")?.let {
             it.attr("data-src").ifBlank { it.attr("src") }
-        }
+        }?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
 
-        // Synopsis lives inside the #info tab / .wp-content
-        val synopsis = doc.select("#info .wp-content p, .wp-content p")
-            .joinToString("\n") { it.text() }
-            .trim()
-            .takeIf { it.isNotBlank() }
+        // Sinopsis: en DooPlay el texto vive DIRECTAMENTE dentro de
+        // #info .wp-content (no en <p>). Se toma su texto propio (ownText)
+        // para excluir la galería interna (#dt_galery).
+        val synopsis = doc.selectFirst("#info .wp-content")?.ownText()?.trim()
+            ?.takeIf { it.isNotBlank() }
 
         val genres = doc.select(".sgeneros a").map { it.text().trim() }
 
@@ -102,22 +111,31 @@ class TioDonghuaProvider : MainAPI() {
         }
 
         // ── Series / Anime ─────────────────────────────────────────────────────
-        // Episodes are listed inside  <ul class="episodios">  grouped by season
-        // Each season block: <div id="season-X"> <ul class="episodios"> <li> …
+        // Los episodios vienen agrupados por temporada en bloques
+        //   <div class="se-c">
+        //     <div class="se-q"><span class="se-t se-o">1</span> Season 1 …</div>
+        //     <div class="se-a"><ul class="episodios"><li> …
+        // El contenedor NO es [id^=season-] (eso ya no existe en el tema actual).
         val episodesBySeasonRaw = mutableMapOf<Int, MutableList<Episode>>()
 
-        // Try season-based grouping first
-        val seasonDivs = doc.select("[id^=season-]")
-        if (seasonDivs.isNotEmpty()) {
-            for (seasonDiv in seasonDivs) {
-                val seasonNum = seasonDiv.id().removePrefix("season-").toIntOrNull() ?: 1
-                seasonDiv.select("li").forEach { li ->
+        val seasonBlocks = doc.select(".se-c")
+        if (seasonBlocks.isNotEmpty()) {
+            for (block in seasonBlocks) {
+                // Número de temporada: del badge .se-t (p.ej. "1"); respaldo: primer
+                // dígito del título del bloque; último recurso: 1.
+                val seasonNum = block.selectFirst(".se-q .se-t")?.text()?.trim()?.toIntOrNull()
+                    ?: block.selectFirst(".se-q .title")?.text()
+                        ?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
+                    ?: 1
+
+                block.select("ul.episodios li").forEach { li ->
                     val epAnchor = li.selectFirst(".episodiotitle a") ?: return@forEach
                     val epUrl    = epAnchor.attr("href").trim()
+                    if (epUrl.isBlank()) return@forEach
                     val epName   = epAnchor.text().trim()
-                    val epNum    = li.selectFirst(".numerando")?.text()
-                        ?.replace("-", "x")
-                        ?.split("x")?.lastOrNull()?.trim()?.toIntOrNull()
+                    // .numerando es del tipo "1 - 2" (temporada - episodio)
+                    val epNum    = li.selectFirst(".numerando")?.text()?.trim()
+                        ?.split(Regex("\\D+"))?.lastOrNull()?.toIntOrNull()
                     episodesBySeasonRaw.getOrPut(seasonNum) { mutableListOf() }
                         .add(newEpisode(epUrl) {
                             this.name    = epName
@@ -127,14 +145,14 @@ class TioDonghuaProvider : MainAPI() {
                 }
             }
         } else {
-            // Fallback: flat episode list
+            // Respaldo: lista plana de episodios (sin agrupación por temporada)
             doc.select(".episodios li").forEach { li ->
                 val epAnchor = li.selectFirst(".episodiotitle a") ?: return@forEach
                 val epUrl    = epAnchor.attr("href").trim()
+                if (epUrl.isBlank()) return@forEach
                 val epName   = epAnchor.text().trim()
-                val epNum    = li.selectFirst(".numerando")?.text()
-                    ?.replace("-", "x")
-                    ?.split("x")?.lastOrNull()?.trim()?.toIntOrNull()
+                val epNum    = li.selectFirst(".numerando")?.text()?.trim()
+                    ?.split(Regex("\\D+"))?.lastOrNull()?.toIntOrNull()
                 episodesBySeasonRaw.getOrPut(1) { mutableListOf() }
                     .add(newEpisode(epUrl) {
                         this.name    = epName
@@ -188,6 +206,11 @@ class TioDonghuaProvider : MainAPI() {
         // Portugues 1-4). No nonce is required for the REST endpoint.
         val playerOptions = doc.select("li.dooplay_player_option[data-post][data-type][data-nume]")
 
+        // El sitio migró a tiodonghua.lat y tiodonghua.com responde 301 hacia él.
+        // Para no depender de esa redirección, la API se pide al mismo host que
+        // sirve la página de episodio (las URLs de episodio ya apuntan a .lat).
+        val baseUrl = Regex("^https?://[^/]+").find(data)?.value ?: mainUrl
+
         for (option in playerOptions) {
             val postId = option.attr("data-post").trim()
             val type   = option.attr("data-type").trim().ifBlank { "tv" }
@@ -195,7 +218,7 @@ class TioDonghuaProvider : MainAPI() {
 
             if (postId.isBlank() || nume.isBlank()) continue
 
-            val apiUrl = "$mainUrl/wp-json/dooplayer/v2/$postId/$type/$nume"
+            val apiUrl = "$baseUrl/wp-json/dooplayer/v2/$postId/$type/$nume"
 
             val jsonText = try {
                 app.get(

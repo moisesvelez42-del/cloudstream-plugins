@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 4
+version = 5
 
 cloudstream {
     description = "Donghua sub español gratis en HD"
@@ -17,7 +17,7 @@ cloudstream {
     // Anime / Donghua content
     tvTypes = listOf("Anime")
 
-    iconUrl = "https://tiodonghua.com/wp-content/uploads/2021/07/cropped-TICO2-192x192.png"
+    iconUrl = "https://tiodonghua.lat/wp-content/uploads/2020/09/cropped-isotipo-192x192.png"
 }
 
 android {
