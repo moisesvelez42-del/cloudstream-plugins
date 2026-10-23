@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Donghualife 2.0 (old.donghualife.com) - Donghuas en español"

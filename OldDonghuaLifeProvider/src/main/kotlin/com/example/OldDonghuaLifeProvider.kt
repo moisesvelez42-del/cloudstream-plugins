@@ -253,22 +253,147 @@ class OldDonghuaLifeProvider : MainAPI() {
         var found = false
 
         // Cada servidor del reproductor: <a class="toggle-enlace" data-video="…">
-        doc.select("a.toggle-enlace[data-video]").forEach { anchor ->
-            val link = anchor.attr("data-video").trim()
-            if (link.isBlank()) return@forEach
-            if (loadExtractor(link, data, subtitleCallback, callback)) found = true
-        }
+        doc.select("a.toggle-enlace[data-video]")
+            .map { it.attr("data-video").trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .forEach { link ->
+                val ok = try {
+                    loadServer(link, data, subtitleCallback, callback)
+                } catch (_: Exception) {
+                    false
+                }
+                if (ok) found = true
+            }
 
         // Respaldo: el iframe ya incrustado en la página del episodio.
         if (!found) {
             doc.select("#video-container iframe[src], iframe#iframe-episode[src]").forEach { iframe ->
                 val src = iframe.attr("src").trim()
-                if (src.isNotBlank() && src.startsWith("http")) {
-                    if (loadExtractor(src, data, subtitleCallback, callback)) found = true
+                if (src.startsWith("http")) {
+                    val ok = try {
+                        loadServer(src, data, subtitleCallback, callback)
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (ok) found = true
                 }
             }
         }
 
+        return found
+    }
+
+    /**
+     * Enruta cada servidor al extractor adecuado. Rumble y Vk no los resuelve
+     * el `loadExtractor` incluido en la app (Rumble no existe y el de Vk quedó
+     * desfasado con el nuevo formato de vkvideo.ru), así que se resuelven aquí.
+     */
+    private suspend fun loadServer(
+        link: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean = when {
+        link.contains("rumble.com") -> loadRumble(link, callback)
+        link.contains("vk.com") || link.contains("vkvideo.ru") -> loadVk(link, callback)
+        else -> loadExtractor(link, referer, subtitleCallback, callback)
+    }
+
+    /** Rumble: el embed público se resuelve con su API de reproductor. */
+    private suspend fun loadRumble(
+        embedUrl: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val id = Regex("""rumble\.com/embed/([^/?#"']+)""")
+            .find(embedUrl)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
+            ?: return false
+
+        val json = app.get(
+            "https://rumble.com/embedJS/u3/?request=video&ver=2&v=$id",
+            referer = embedUrl,
+            headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Accept" to "application/json, text/plain, */*",
+            ),
+        ).text.replace("\\/", "/")
+
+        var found = false
+        val emitted = mutableSetOf<String>()
+
+        val candidates = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""")
+            .findAll(json).map { it.value to ExtractorLinkType.M3U8 }.toList() +
+            Regex("""https?://[^"'\s]+?\.mp4[^"'\s]*""")
+                .findAll(json).map { it.value to ExtractorLinkType.VIDEO }.toList()
+
+        candidates.forEach { (videoUrl, type) ->
+            if (!emitted.add(videoUrl)) return@forEach
+            callback.invoke(
+                newExtractorLink("Rumble", "Rumble", videoUrl, type) {
+                    this.referer = "https://rumble.com/"
+                    this.headers = mapOf("User-Agent" to USER_AGENT)
+                }
+            )
+            found = true
+        }
+        return found
+    }
+
+    /** Vk (vkvideo.ru): requiere la cookie que entrega en el primer redirect. */
+    private suspend fun loadVk(
+        url: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val headers = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.5",
+            "Referer" to "https://vk.com/",
+        )
+        val cookies = app.get(url, headers = headers, allowRedirects = false).cookies
+        val html = app.get(url, headers = headers, cookies = cookies, allowRedirects = false)
+            .text.replace("\\/", "/")
+
+        var found = false
+        val emitted = mutableSetOf<String>()
+
+        // HLS: formatos nuevos (hls_ondemand / hls_fmp4) y clásico (hls).
+        Regex(""""(?:hls_ondemand|hls_fmp4|hls)"\s*:\s*"(https?:[^"]+)"""")
+            .findAll(html).forEach { m ->
+                val videoUrl = m.groupValues[1]
+                if (emitted.add(videoUrl)) {
+                    callback.invoke(
+                        newExtractorLink("Vk", "Vk", videoUrl, ExtractorLinkType.M3U8) {
+                            this.referer = "https://vk.com/"
+                            this.headers = mapOf(
+                                "User-Agent" to USER_AGENT,
+                                "Referer" to "https://vk.com/",
+                            )
+                        }
+                    )
+                    found = true
+                }
+            }
+
+        // MP4 por calidad: nombres nuevos (mp4_1080) o clásicos (url720).
+        Regex(""""(?:mp4_|url)(\d+)"\s*:\s*"(https?:[^"]+)"""")
+            .findAll(html).forEach { m ->
+                val quality = m.groupValues[1]
+                val videoUrl = m.groupValues[2]
+                if (emitted.add(videoUrl)) {
+                    callback.invoke(
+                        newExtractorLink("Vk", "Vk", videoUrl, ExtractorLinkType.VIDEO) {
+                            this.referer = "https://vk.com/"
+                            this.headers = mapOf(
+                                "User-Agent" to USER_AGENT,
+                                "Referer" to "https://vk.com/",
+                            )
+                            this.quality = getQualityFromName(quality)
+                        }
+                    )
+                    found = true
+                }
+            }
         return found
     }
 
