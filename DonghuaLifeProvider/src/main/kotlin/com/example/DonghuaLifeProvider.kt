@@ -191,13 +191,17 @@ class DonghuaLifeProvider : MainAPI() {
     }
 
     // ─── Enlaces de vídeo ──────────────────────────────────────────────────────
-    // El HTML del episodio/película no trae <iframe> ni data-video. Las fuentes
-    // se resuelven con la API interna: GET /api/sources?episodeId=<uuid>
-    // (o ?movieId=<uuid> para películas), que devuelve:
-    //   {"sources":[{"url":"…","name":"…","provider":"…","type":"embed"}, …]}
-    // El id se extrae del payload RSC de la propia página. Cada URL se pasa a
-    // loadExtractor, que ya soporta dailymotion, ok.ru, rumble, voe, filemoon,
-    // streamwish, dood, odysee, etc.
+    // El reproductor de este sitio es un componente Next.js que funciona así:
+    //   1) La página /watch/<slug> incluye en su payload RSC un array "sources"
+    //      con los proveedores disponibles (R2, Dailymotion, Ok.ru, Rumble, Vk,
+    //      Odysee…) y, por cada uno, un `token` cifrado.
+    //   2) El cliente hace POST /api/player/source con {"token": …} y recibe el
+    //      enlace real ({"url": …}). Si falla, pide un token nuevo a
+    //      POST /api/player/refresh y reintenta.
+    // OJO: el endpoint GET /api/sources?episodeId=… NO sirve: devuelve datos de
+    // ejemplo (dailymotion/rumble/cdn.example.com).
+    // El proveedor "video" (R2) entrega un HLS servido por el propio sitio
+    // (/api/r2-media?u=…), que no cubre ningún extractor: se emite como M3U8.
 
     override suspend fun loadLinks(
         data: String,
@@ -206,25 +210,119 @@ class DonghuaLifeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val html = app.get(data, referer = mainUrl).text
-
-        val entityParam = if (data.contains("/peliculas/")) {
-            rscUuid(html, "movieId")?.let { "movieId=$it" }
-        } else {
-            rscUuid(html, "episodeId")?.let { "episodeId=$it" }
-        } ?: return false
-
-        val sources = app.get("$mainUrl/api/sources?$entityParam", referer = data)
-            .parsedSafe<SourcesResponse>()?.sources ?: return false
+        val sources = rscSources(html)
+        if (sources.isEmpty()) return false
 
         var found = false
-        sources.forEach { source ->
-            val link = source.url?.trim()
-            if (!link.isNullOrBlank() && link.startsWith("http")) {
-                loadExtractor(link, data, subtitleCallback, callback)
-                found = true
+        for (source in sources) {
+            val token = source.token?.takeIf { it.isNotBlank() } ?: continue
+            val label = source.label ?: source.name ?: source.provider ?: name
+
+            for (raw in resolveSourceUrls(token, data)) {
+                val link = fixUrl(raw.trim())
+
+                // HLS servido por el propio sitio (proveedor R2).
+                if (link.contains("/api/r2-media") ||
+                    link.substringBefore('?').endsWith(".m3u8")
+                ) {
+                    callback.invoke(
+                        newExtractorLink(label, label, link, ExtractorLinkType.M3U8) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    found = true
+                } else if (loadExtractor(link, data, subtitleCallback, callback)) {
+                    found = true
+                }
             }
         }
         return found
+    }
+
+    /**
+     * Extrae el array "sources" del payload RSC de la página del reproductor.
+     * Cada elemento trae el proveedor y un token cifrado; las fuentes reales
+     * solo se obtienen canjeando ese token.
+     */
+    private fun rscSources(html: String): List<RscSource> {
+        val unescaped = html.replace("\\\"", "\"")
+        val marker = "\"sources\":[{"
+        val start = unescaped.indexOf(marker)
+        if (start < 0) return emptyList()
+
+        // Se localiza el cierre del array contando corchetes.
+        val arrayStart = unescaped.indexOf('[', start + "\"sources\":".length)
+        if (arrayStart < 0) return emptyList()
+        var depth = 0
+        var end = -1
+        for (i in arrayStart until unescaped.length) {
+            when (unescaped[i]) {
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) {
+                        end = i
+                        break
+                    }
+                }
+            }
+        }
+        if (end < 0) return emptyList()
+        val body = unescaped.substring(arrayStart + 1, end)
+
+        // Los objetos no contienen llaves anidadas, así que basta el regex.
+        return Regex("\\{[^{}]*\\}").findAll(body).mapNotNull { match ->
+            val obj = match.value
+            val token = obj.stringField("token") ?: return@mapNotNull null
+            RscSource(
+                token = token,
+                provider = obj.stringField("provider"),
+                name = obj.stringField("name"),
+                label = obj.stringField("label"),
+                type = obj.stringField("type"),
+            )
+        }.toList()
+    }
+
+    private fun String.stringField(key: String): String? =
+        Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"")
+            .find(this)?.groupValues?.getOrNull(1)?.ifBlank { null }
+
+    /**
+     * Canjea un token por su enlace real mediante POST /api/player/source.
+     * Si la respuesta no trae URL, reintenta con un token nuevo de
+     * /api/player/refresh, igual que hace el reproductor web.
+     */
+    private suspend fun resolveSourceUrls(token: String, referer: String): List<String> {
+        val headers = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Origin" to mainUrl,
+            "Accept" to "application/json, text/plain, */*",
+        )
+
+        suspend fun call(endpoint: String, value: String): PlayerSourceResponse? = try {
+            app.post(
+                "$mainUrl$endpoint",
+                headers = headers,
+                referer = referer,
+                json = mapOf("token" to value),
+            ).parsedSafe<PlayerSourceResponse>()
+        } catch (_: Exception) {
+            null
+        }
+
+        val first = call(PLAYER_SOURCE_ENDPOINT, token)
+            ?.takeIf { !it.url.isNullOrBlank() || !it.qualities.isNullOrEmpty() }
+
+        val result = first ?: call(PLAYER_REFRESH_ENDPOINT, token)
+            ?.token?.takeIf { it.isNotBlank() }
+            ?.let { call(PLAYER_SOURCE_ENDPOINT, it) }
+
+        val urls = mutableListOf<String>()
+        result?.qualities?.mapNotNullTo(urls) { it.url?.ifBlank { null } }
+        result?.url?.ifBlank { null }?.let { if (it !in urls) urls.add(it) }
+        return urls
     }
 
     // ─── Utilidades ────────────────────────────────────────────────────────────
@@ -241,32 +339,39 @@ class DonghuaLifeProvider : MainAPI() {
             .find(unescaped)?.groupValues?.getOrNull(1)
     }
 
-    /** Lee un UUID del payload RSC para una clave dada (episodeId / movieId). */
-    private fun rscUuid(html: String, key: String): String? {
-        val unescaped = html.replace("\\\"", "\"")
-        return Regex("\"$key\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"")
-            .find(unescaped)?.groupValues?.getOrNull(1)
-    }
-
     // ─── Modelos JSON ──────────────────────────────────────────────────────────
 
     data class EpisodesResponse(val episodes: List<EpisodeItem>? = null)
 
     data class EpisodeItem(val number: Int? = null, val title: String? = null)
 
-    data class SourcesResponse(val sources: List<SourceItem>? = null)
-
-    data class SourceItem(
-        val url: String? = null,
+    /** Fuente tal como aparece en el array "sources" del payload RSC. */
+    data class RscSource(
+        val token: String? = null,
+        val provider: String? = null,
         val name: String? = null,
         val label: String? = null,
-        val provider: String? = null,
         val type: String? = null,
     )
+
+    /** Respuesta de /api/player/source (y /api/player/refresh para el token). */
+    data class PlayerSourceResponse(
+        val url: String? = null,
+        val qualities: List<QualityItem>? = null,
+        val token: String? = null,
+        val error: String? = null,
+    )
+
+    data class QualityItem(val url: String? = null, val label: String? = null)
 
     companion object {
         // Clases reales presentes en portada, listados y buscador.
         private const val CARD_SELECTOR = "article.poster-card, div.poster-card, a.poster-card"
+        private const val PLAYER_SOURCE_ENDPOINT = "/api/player/source"
+        private const val PLAYER_REFRESH_ENDPOINT = "/api/player/refresh"
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         private val SEASON_REGEX =
             Regex("\"slug\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"label\"\\s*:\\s*\"([^\"]+)\"")
     }
